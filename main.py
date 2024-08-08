@@ -16,6 +16,7 @@ import hyp3_sdk
 import numpy as np
 import datetime
 import glob
+import time
 
 
 CACHE_DIR = Path(__file__).parent / "cache"
@@ -173,59 +174,77 @@ def get_downloaded_files(download_dir: Path = CACHE_DIR / "../insar"):
     return files
 
 def filter_existing_baselines(baselines: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    baselines = baselines.copy()
     filenames = get_downloaded_files()
 
     files_present = []
     for i, baseline in baselines.iterrows():
         matches = fnmatch.filter(filenames, baseline["product_glob"])
-        if len(matches) == 0:
+
+        filtered_matches = []
+        for filename in matches:
+            if any(pol + "R" in filename for pol in ["HH", "VV"]):
+                diff = pd.Timestamp.utcnow() - baseline["ref_time"]
+
+                if diff.days > 40:
+                    continue
+            filtered_matches.append(filename)
+        if len(filtered_matches) == 0:
             continue
 
-        if len(matches) > 1:
-            raise ValueError(f"Pattern {baseline['product_glob']} matched multiple files")
+
+            
+        # if len(matches) > 1:
+        #     raise ValueError(f"Pattern {baseline['product_glob']} matched multiple files")
+
 
         files_present.append(i)
 
-    return baselines.drop(files_present).sort_values("ref_time")
+    baselines.drop(files_present, inplace=True)
+
+    submitted_path = Path("submitted.txt")
+    if submitted_path.is_file():
+        with open(submitted_path) as infile:
+            submitted = infile.read().splitlines()
+
+        baselines = baselines[~baselines["job_name"].isin(submitted)]
+
+    return baselines.sort_values("ref_time", ascending=False)
     
 
 def now_str() -> str:
-    return datetime.datetime.now().strftime('%Y-%m-%d %H-%M-%S')
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
 
 def report_jobs(hyp3_instance: hyp3_sdk.HyP3, jobs: hyp3_sdk.Batch, download_location: Path, verbose: bool = True):
-
-    running_jobs = jobs.filter_jobs(running=True)
-
-    for job in running_jobs:
-        print(job.files)
-
-    if len(running_jobs) > 0:
-        if verbose:
-            print(f"{now_str()}: Awaiting {len(running_jobs)} jobs")
-
-        hyp3_instance.watch(running_jobs)
-
-        
-        jobs = hyp3_instance.refresh(jobs)
-        
-    succeeded_jobs = jobs.filter_jobs(succeeded=True, running=False, failed=False)
-    failed_jobs = jobs.filter_jobs(succeeded=False, running=False, failed=True)
-
-    if len(failed_jobs) > 0:
-        print(f"{len(failed_jobs)} failed jobs: {failed_jobs}")
-
+    succeeded_jobs = jobs.filter_jobs(succeeded=True, running=False, failed=False, pending=False, include_expired=False)
     jobs_to_download = []
     for job in succeeded_jobs:
+        if job.files is None:
+            continue
         for inner_file in job.files:
             filepath = download_location / inner_file["filename"]
             if not filepath.is_file():
                 jobs_to_download.append(job)
 
-    for job in tqdm.tqdm(jobs_to_download, desc="Downloading data"):
+    if len(jobs_to_download) > 0:
+        print(f"{now_str()}: Downloading {len(jobs_to_download)} files")
+    for job in jobs_to_download:
         job.download_files(download_location)
 
-        
+
+    running_jobs = jobs.filter_jobs(running=True, succeeded=False, pending=True, failed=False)
+
+    if len(running_jobs) > 0:
+        if verbose:
+            print(f"{now_str()}: Awaiting {len(running_jobs)} jobs")
+
+        # hyp3_instance.watch(running_jobs, timeout=20000)
+
+    failed_jobs = jobs.filter_jobs(succeeded=False, running=False, failed=True, pending=False, include_expired=False)
+
+    if len(failed_jobs) > 0:
+        print(f"{len(failed_jobs)} failed jobs: {failed_jobs}")
     
 
 def download_baselines(baselines: gpd.GeoDataFrame, jobs_per_batch: int = 10, download_location: Path = CACHE_DIR / "../insar"):
@@ -247,9 +266,41 @@ def download_baselines(baselines: gpd.GeoDataFrame, jobs_per_batch: int = 10, do
     splits = splits[splits < baselines.shape[0]]
     batches = np.split(baselines.index, splits)
 
+    # print(f"Temporary break: {baselines.shape[0]} jobs to go")
+    # return
 
-    print(f"Temporary break: {baselines.shape[0]} jobs to go")
-    return
+
+    # while 
+    jobs = hyp3_sdk.Batch()
+    for _, baseline in baselines.iterrows():
+        while len(hyp3.find_jobs(name="insar-download-python").filter_jobs(running=True, succeeded=False, failed=False, pending=True)) > 9:
+            time.sleep(180)
+
+        print(f"{now_str()}: Querying {baseline['job_name']}")
+        jobs += hyp3.submit_insar_job(
+                granule1=baseline["other_name"],
+                granule2=baseline["ref_name"],
+                looks="10x2", 
+                include_look_vectors=True,
+                include_dem=True,
+                include_displacement_maps=False,
+                include_inc_map=False,
+                include_wrapped_phase=False,
+                apply_water_mask=False,
+                phase_filter_parameter=0.6,
+                name="insar-download-python",
+        )
+
+        with open("submitted.txt", "a+") as outfile:
+            outfile.write(baseline["job_name"] + "\n")
+
+    
+        report_jobs(hyp3, hyp3.find_jobs(name="insar-download-python"), download_location=download_location, verbose=False)
+
+    hyp3.watch(timeout=24000)
+
+        
+        
     for indices in batches:
         jobs = hyp3_sdk.Batch()
 
@@ -268,8 +319,11 @@ def download_baselines(baselines: gpd.GeoDataFrame, jobs_per_batch: int = 10, do
                     name="insar-download-python",
             )
 
+            with open("submitted.txt", "a+") as outfile:
+                outfile.write(baseline["job_name"] + "\n")
+
         print(f"{now_str()}: Submitted {len(jobs)} jobs")
-        jobs = hyp3.watch(jobs)
+        jobs = hyp3.watch(jobs, timeout=20000)
 
         report_jobs(hyp3, jobs, download_location=download_location, verbose=False)
 
@@ -292,17 +346,20 @@ def main():
 
 
     # TEMPORARY. For testing
-    baselines = baselines[baselines["ref_time"].dt.year == 2024]
-    baselines = baselines.iloc[:3]
+    # baselines = baselines[baselines["ref_time"].dt.year == 2024]
+    # baselines = baselines.iloc[:3]
 
 
     # baselines = baselines.query('flightDirection == "DESCENDING"')
 
+
     to_process = filter_existing_baselines(baselines)
+
     print(f"{len(baselines) - len(to_process)} files present. {len(to_process)} to process.")
 
     if to_process.shape[0] == 0:
         print("All scenes exist")
+        raise NotImplementedError("There may still be un-downloaded scenes. A final download pass is not implemented.")
         return
 
     download_baselines(to_process)
@@ -322,6 +379,97 @@ def main():
 
     # print(result[0].stack)
     
+def make_coh_vrts():
+
+    insar_files = sorted(list(Path("insar/").glob("S1*.zip")))
+    # import rasterio
+    from osgeo import gdal
+    gdal.UseExceptions()
+
+    orbits = []
+    paths = []
+    last_time = datetime.datetime.now()
+    for zip_path in tqdm.tqdm(insar_files, desc="Building VRTs"):
+
+        start_time = datetime.datetime.strptime(zip_path.stem.split("_")[1], "%Y%m%dT%H%M%S")
+        diff = start_time - last_time
+        pol = zip_path.stem.split("_")[3][:2]
+        sat = zip_path.stem.split("_")[0]
+
+        filename = f"/vsizip/{zip_path.absolute()}/{zip_path.stem}/{zip_path.stem}_corr.tif"
+
+        try:
+            if "33N" not in gdal.Info(filename):
+                vrt_filepath = Path(f"cache/vrts/{zip_path.stem}_corr.vrt")
+
+                if not vrt_filepath.is_file():
+                    vrt_filepath.parent.mkdir(exist_ok=True, parents=True)
+                    gdal.Warp(str(vrt_filepath),  filename, resampleAlg="Bilinear", format="VRT", dstSRS="EPSG:32633")
+                filename = str(vrt_filepath.absolute())
+        except RuntimeError as exception:
+            if "not recognized as a supported" not in str(exception):
+                raise exception
+
+            print(f"Failed on {zip_path}")
+        
+        if diff.total_seconds() > 120 or len(orbits) == 0:
+            orbits.append({"start_time": start_time, "pol": pol, "sat": sat, "files": [filename]})
+        else:
+            orbits[-1]["files"].append(filename)
+
+            
+        last_time = start_time
+
+            
+
+
+    for orbit in orbits:
+
+        
+        out_file = Path(f"vrts/per_orbit/{orbit['start_time'].year}/{orbit['pol']}/{orbit['sat']}_{orbit['start_time'].strftime('%Y%m%d')}_{orbit['pol']}.vrt")
+
+        out_file.parent.mkdir(exist_ok=True, parents=True)
+
+        gdal.BuildVRT(str(out_file), orbit["files"])
+                    
+
+        # paths.append(str(vrt_filepath.absolute()))
+
+        # print(filename, start_time)
+
+
+        # print(diff)
+        # if diff.total_seconds() > 120:
+        #     if len(paths) > 2:
+        #         date_str = start_time.strftime("%Y%m%d")
+        #         out_file = Path(f"vrts/per_orbit/{start_time.year}/{pol}/{sat}_{date_str}_{pol}.vrt")
+
+        #         out_file.parent.mkdir(exist_ok=True, parents=True)
+                
+        #         print(paths[:-1])
+        #         return
+        #         gdal.BuildVRT(str(out_file), paths[:-1])
+        #     paths = [paths[-1]]
+
+            
+
+
+        # continue
+
+        # year = int(zip_path.stem[5:9])
+
+        # out_file = Path(f"vrts/{year}/{zip_path.stem}_corr.vrt")
+
+        # if out_file.is_file():
+        #     continue
+
+        # out_file.parent.mkdir(exist_ok=True, parents=True)
+        
+        # gdal.BuildVRT(str(out_file), filename)
+            
+        # with rasterio.open(filename) as raster:
+        #     print(raster)
+
 
 if __name__ == "__main__":
     main()

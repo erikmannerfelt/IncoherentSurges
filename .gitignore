@@ -1,3 +1,9 @@
 cache/
 files.txt
 insar/
+vrts/
+__pycache__/
+*.bkp/
+*.qgs~
+figures/
+eton/
