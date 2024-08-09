@@ -36,6 +36,8 @@ def measure_lengths(positions: gpd.GeoDataFrame, centerline: shapely.geometry.Li
             for cut in cut_geoms.geoms:
                 if line.coords[-1][0] == cut.coords[-1][0] and line.coords[-1][1] == cut.coords[-1][1]:
                     break
+            else:
+                raise NotImplementedError("Line was not cut properly")
 
             cut_lengths = glacier_lengths.measure_lengths(cut)
 
@@ -143,7 +145,7 @@ def measure_velocity(lengths):
 
     return diff_per_day
 
-def plot_length_evolution(glacier: str = "edvard"):
+def plot_length_evolution(glacier: str = "kval"):
 
 
     gis_key = {
@@ -197,7 +199,7 @@ def plot_length_evolution(glacier: str = "edvard"):
     Path("figures/").mkdir(exist_ok=True)
 
     fig = plt.figure(figsize=(8, 5))
-    for data, params in [(front_lengths, {"color": "blue", "label": "Terminus", "zorder": 2, "key": "front"}), (lower_coh_lengths, {"color": "orange", "label": "Lower instability", "zorder": 1, "key": "lower_coh"}), (upper_coh_lengths, {"color": "green", "label": "Upper instability", "zorder": 1, "key": "upper_coh"})]:
+    for data, params in [(front_lengths, {"color": "blue", "label": "Terminus", "zorder": 2, "key": "front"}), (lower_coh_lengths, {"color": "orange", "label": "Lower low-coh. bnd.", "zorder": 1, "key": "lower_coh"}), (upper_coh_lengths, {"color": "green", "label": "Upper low-coh. bnd.", "zorder": 1, "key": "upper_coh"})]:
         if data is None:
             continue
 
@@ -207,16 +209,16 @@ def plot_length_evolution(glacier: str = "edvard"):
         plt.scatter(data["date"], data["median"] / 1e3, color=params["color"], zorder=params["zorder"])
         plt.ylabel("Glacier length (km)")
         plt.xlabel("Year")
-        plt.legend()
 
         plt.subplot(122)
         plt.fill_between(np.ravel(np.column_stack((velocities[params["key"]].index.left, velocities[params["key"]].index.right))), np.repeat(velocities[params["key"]]["lower"], 2), np.repeat(velocities[params["key"]]["upper"], 2), alpha=0.3, color=params["color"], zorder=params["zorder"])
-        plt.plot(np.ravel(np.column_stack((velocities[params["key"]].index.left, velocities[params["key"]].index.right))), np.repeat(velocities[params["key"]]["median"], 2), color=params["color"], zorder=params["zorder"])
+        plt.plot(np.ravel(np.column_stack((velocities[params["key"]].index.left, velocities[params["key"]].index.right))), np.repeat(velocities[params["key"]]["median"], 2), color=params["color"], zorder=params["zorder"],label=params["label"] )
         plt.ylabel("Advance/retreat rate (m/d)")
         plt.xlabel("Year")
         plt.gca().yaxis.tick_right()
         plt.gca().yaxis.set_label_position("right")
 
+    plt.legend()
     plt.tight_layout()
     plt.savefig(f"figures/{glacier}_front_change.jpg", dpi=300)
     plt.show()
