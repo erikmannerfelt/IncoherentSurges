@@ -5,6 +5,10 @@ import geopandas as gpd
 import pandas as pd
 import glacier_lengths
 import shapely
+import fnmatch
+import rasterio
+import rasterio.features
+import itertools
 
 S1_DIR = Path("/media/storage/Erik/Projects/UiO/S1_animation/")
 
@@ -445,6 +449,139 @@ def main():
 
     plt.savefig("figures/front_change.jpg", dpi=300)
     plt.show()
+
+
+def load_coh(glacier: str):
+    gis_key = {
+        "vallakra": "vallakrabreen",
+        "eton": "etonfront",
+    }
+
+    default_files_hh = {
+        2016: [
+            "*S1AA_20160329*HH*",
+        ],
+        2018: [
+            "*S1AA_20180319*HH*",
+        ],
+        2019: [
+            "*S1AA_20190302*HH*",
+        ],
+        2020: [
+            "*S1AA_20200401*HH*",
+        ],
+        2021: [
+            "*S1AA_20210207*HH*",
+        ],
+        2022: [
+            "*S1AA_20220403*HH*",
+        ],
+        2023: [
+            "*S1AA_20230422*HH*",
+        ],
+        2024: [
+            "*S1AA_20240403*HH*",
+            "*S1AA_20240404*HH*",
+        ],
+    }
+
+    front_positions, centerline, domain, coh_boundary = get_front_positions(glacier=glacier, gis_key=gis_key.get(glacier, glacier))
+
+    bounds = rasterio.coords.BoundingBox(*domain.buffer(200).bounds)
+
+    res = (40., 40.)
+    transform = rasterio.transform.from_origin(bounds.left, bounds.top, *res)
+    out_shape = int((bounds.top - bounds.bottom) / res[1]), int(np.ceil((bounds.right - bounds.left) /res[0])) 
+
+    # plt.imshow(centerline_rst)
+    # plt.show()
+
+    # rasterio.features.rasterize((domain
+    meta = {}
+    data = {"coh": {}}
+
+    for year in default_files_hh:
+        for filepath in itertools.chain(*(map(Path, fnmatch.filter(map(str, Path("insar/").glob("*.zip")), pattern)) for pattern in default_files_hh[year])):
+        # for pattern in default_files_hh[year]:
+        #     for filepath in map(Path, fnmatch.filter(map(str, Path("insar/").glob("*.zip")), pattern)):
+
+            filename = f"/vsizip/{filepath}/{filepath.stem}/{filepath.stem}_corr.tif"
+
+            with rasterio.open(filename) as raster:
+                if (raster.bounds.left < domain.centroid.x < raster.bounds.right) and (raster.bounds.bottom < domain.centroid.y < raster.bounds.top):
+                    test_val = raster.sample([[domain.centroid.x, domain.centroid.y]], masked=True).__next__().filled(np.nan)[0]
+                    if not np.isfinite(test_val):
+                        continue
+
+                    window = rasterio.windows.from_bounds(*bounds, transform=raster.transform)
+                    data["coh"][year] = raster.read(1, window=window, boundless=True)
+                    meta["shape"] = data["coh"][year].shape
+
+
+    max_centerline_length = {"natascha": 18300}.get(glacier, centerline.length)
+
+    width = res[0] * 3
+    centerline_pts = []
+    for dist in np.arange(width, max_centerline_length, step=width):
+        centerline_pts.append((centerline.interpolate(dist).buffer(width), int(dist)))
+
+    data["centerline"] = rasterio.features.rasterize(centerline_pts, out_shape=meta["shape"], transform=transform)
+
+    
+    bins = np.r_[[-100], np.linspace(width, max_centerline_length, num=20), [centerline.length * 2]]
+    centerline_binned = np.digitize(data["centerline"], bins=bins)
+
+    plt.figure(figsize=(8, 5))
+    for i, year in enumerate(sorted(data["coh"])):
+        plt.subplot(1, len(data["coh"]), i + 1)
+
+        xvals = []
+        yvals = []
+        for value in np.unique(centerline_binned):
+            if value < 2:
+                continue
+            mask = centerline_binned == value
+
+            xvals.append(bins[value] / 1000)
+            yvals.append(np.mean(data["coh"][year][mask]))
+
+        plt.title(year)
+        plt.plot(yvals, xvals, color="black")
+        ylim = plt.gca().get_ylim()
+        plt.ylim(ylim[::-1])
+
+        for j in range(1, len(yvals)):
+            if yvals[j] > 0.54:
+                plt.scatter(yvals[j - 1], xvals[j -1], marker="x", s=60, color="red")
+                break
+
+        yticks = plt.gca().get_yticks()
+        if i != 0:
+            plt.yticks(yticks, [""] * len(yticks))
+        else:
+            plt.yticks(yticks)
+            plt.ylabel("Distance (km)")
+            plt.xlabel("Coherence")
+
+        plt.xlim(0, 1)
+        plt.xticks([0., 0.5, 1.], None if i == 0 else [""] * 3)
+
+        plt.grid(alpha=0.5)
+        # plt.xticks(plt.gca().get_xticks()[[0, -1]])
+
+            
+        # plt.title(year)
+        # plt.imshow(data[year], cmap="Greys_r")
+
+    # plt.legend()
+
+    if glacier == "natascha":
+        plt.subplots_adjust(left=0.08, bottom=0.05, right=0.99, top=0.95, wspace=0.01)
+    else:
+        plt.tight_layout()
+    plt.savefig(f"figures/{glacier}_coh_along_center.jpg", dpi=300)
+    plt.show()
+    
 
 
 if __name__ == "__main__":
