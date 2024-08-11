@@ -101,6 +101,7 @@ def get_front_positions(glacier: str, gis_key: str | None = None):
     missing_date = low_coh_boundary["date"].isna()
 
     low_coh_boundary.loc[missing_date, "date"] = pd.to_datetime(low_coh_boundary["year"].astype(str) + "-04-01")
+    low_coh_boundary["date"] = pd.to_datetime(low_coh_boundary["date"])
     # low_coh_boundary["date"] = pd.to_datetime(low_coh_boundary["year"].astype(str) + "-04-01")
     
     return front_positions, centerline, domain, low_coh_boundary
@@ -145,7 +146,199 @@ def measure_velocity(lengths):
 
     return diff_per_day
 
-def plot_length_evolution(glacier: str = "kval"):
+def get_length_evolution(glacier: str):
+    gis_key = {
+        "vallakra": "vallakrabreen",
+        "eton": "etonfront",
+    }
+
+    # Load the digitized data
+    front_positions, centerline, domain, coh_boundary = get_front_positions(glacier=glacier, gis_key=gis_key.get(glacier, glacier))
+
+    # Split the lower and upper coherence boundaries
+    lower_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "lower"]
+    upper_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "upper"]
+
+    # Calculate the glacier front lengths
+    front_lengths_raw, front_lengths = measure_lengths(front_positions, centerline, domain)
+    front_lengths = front_lengths.set_index("date")
+
+    # The final output index will be conformed to this date list
+    all_dates = np.unique(np.r_[coh_boundary["date"], front_lengths.index])
+    
+    def to_multiindex(df, name: str, mi_name: str = "kind"):
+        """From https://stackoverflow.com/a/42094658."""
+        return pd.concat({name: df}, names=[mi_name]) 
+
+    # Interpolate and back-/front-fill the front positions to the whole time range, and create the output dataframe.
+    data = to_multiindex(front_lengths.reindex(all_dates).interpolate("linear").bfill().ffill(), "front")
+
+    # The "exact" label tells if the data are measured or interpolated
+    data["exact"] = False
+    data.loc[("front", front_lengths.index), "exact"] = True
+
+    # If there are data on the lower coherence boundary, add them.
+    if lower_coh_boundary.shape[0] > 0:
+        lower_coh_lengths_raw, lower_coh_lengths = measure_lengths(lower_coh_boundary, centerline, domain)
+        lower_coh_lengths["exact"] = True
+        
+        data = pd.concat([data, to_multiindex(lower_coh_lengths.set_index("date"), "lower_coh")], join="outer")
+
+    # If there are data on the upper coherence boundary, add them.
+    if upper_coh_boundary.shape[0] > 0:
+        upper_coh_lengths_raw, upper_coh_lengths = measure_lengths(upper_coh_boundary, centerline, domain)
+        upper_coh_lengths["exact"] = True
+        data = pd.concat([data, to_multiindex(upper_coh_lengths.set_index("date"), "upper_coh")], join="outer")
+
+    # Assert whether it's a top-down surge or a bottom up. Start with the top-down assumption.
+    top_down = True
+    if "upper_coh" in data.index.get_level_values(0):
+        # If the dataset has an upper_coh column (almost exclusive to bottom-up) and ...
+        # the upper_coh column is generally going up-glacier, it's assumed to be a bottom-up surge
+        if data.loc[("upper_coh", slice(None)), "median"].diff().mean() < 0:
+            top_down = False
+
+    if top_down:
+        # If there's no upper coherence boundary, assume that it starts at zero
+        if "upper_coh" not in data.index.get_level_values(0):
+            new_data = pd.Series({key: 0. for key in front_lengths.columns} | {"exact": False}).to_frame(all_dates[0]).T.reindex(all_dates).ffill()
+
+            data = pd.concat([data, to_multiindex(new_data, "upper_coh")])
+        # This has never been encountered so far, so it's not implemented.
+        else:
+            raise NotImplementedError("Upper coh exists for a top-down surge")
+
+    # If a bottom-up surge:
+    else:
+        # If there's no lower coherence boundary in the data, assume that it's exactly at the terminus
+        if "lower_coh" not in data.index.get_level_values(0):
+            front_data = data.loc["front"].copy()
+            front_data["exact"] = False
+            data = pd.concat([data, to_multiindex(front_data, "lower_coh")])
+        # If there is a boundary, assume that it starts at the terminus but then moves up-glacier;
+        # It will be equal to the terminus before the measurements and interpolated/ffilled after.
+        else:
+
+            idx = data.loc["lower_coh"].index
+            new_idx = all_dates[all_dates >= idx.min()]
+
+            lower_coh = data.loc["lower_coh"].drop(columns="exact").reindex(new_idx).interpolate("slinear").bfill().ffill()
+            lower_coh["exact"] = lower_coh.index.isin(idx)
+            front_data = data.loc["front"].copy()
+            front_data["exact"] = False
+            front_data.loc[lower_coh.index] = lower_coh
+            
+            data = pd.concat([data.drop(index="lower_coh"), to_multiindex(front_data, "lower_coh")])
+            
+    data = data.sort_index()
+
+    # Interpolate/bfill/ffill the main measurement for the type of surge.
+    col = "lower_coh" if top_down else "upper_coh"
+    coh = data.loc[col]
+    orig_idx = coh.index.copy()
+    coh = coh.reindex(all_dates).drop(columns=["exact"]).interpolate("slinear").bfill().ffill()
+    coh["exact"] = coh.index.isin(orig_idx)
+    data = pd.concat([data.drop(index=col), to_multiindex(coh, col)])
+
+    # Identify areas where the boundaries are outside of the terminus, and correct it.
+    num_cols = ["upper", "lower", "mean", "median"]
+    for idx in ["lower_coh", "upper_coh"]:
+        mask = (data.loc["front", num_cols] < data.loc[idx, num_cols])
+        replacement = data.loc[["front"]]
+        replacement.index = data.loc[[idx]].index
+        data[to_multiindex(mask, idx)] = replacement
+
+    expected_length = all_dates.shape[0] * 3
+    if expected_length != data.shape[0]:
+        raise ValueError(f"Expected length of the dataset ({expected_length}) is different from its shape ({data.shape})")
+
+
+    # Calculate front propagation velocities in m/d
+    dt_days = pd.Series(data.loc["front"].index, data.loc["front"].index).diff().dt.total_seconds() / (3600 * 24)
+    for kind, kind_data in data.groupby(level=0):
+        shifted = kind_data.shift(1)
+        dt_days_multi = to_multiindex(dt_days, str(kind))
+
+        data.loc[kind, "vel"] = (kind_data["median"] - shifted["median"]) / dt_days_multi
+
+        vel_upper = kind_data["upper"] - shifted["upper"]
+        vel_lower = kind_data["lower"] - shifted["lower"]
+
+        data.loc[kind, "vel_upper"] = np.where(vel_upper > vel_lower, vel_upper, vel_lower) / dt_days_multi
+        data.loc[kind, "vel_lower"] = np.where(vel_upper > vel_lower, vel_lower, vel_upper) / dt_days_multi
+
+    # Convert units from m to km
+    data[num_cols] /= 1000
+
+    data["surge_kind"] = "top-down" if top_down else "bottom-up"
+
+    return data
+    
+
+
+def plot_length_evolution(glacier: str = "arnesen", show: bool = False):
+
+    names = {
+        "vallakra": "Vallåkrabreen",
+        "natascha": "Paulabreen",
+    }
+
+    data = get_length_evolution(glacier=glacier)
+    
+    plt.fill_between(np.unique(data.index.get_level_values(1)), data.loc["front", "median"], color="#" + "c" * 4 + "ff")
+    plt.fill_between(np.unique(data.index.get_level_values(1)), data.loc["upper_coh", "median"], data.loc["lower_coh", "median"], color="gray")
+    plt.plot(data.loc["front", "median"], color="blue")
+
+    all_params = {
+        "front": {
+            "color": "blue",
+            "zorder": 3,
+        },
+        "lower_coh": {
+            "color": "red",
+            "zorder": 2,
+        },
+        "upper_coh": {
+            "color": "green",
+            "zorder": 1,
+        },
+    }
+    # zorders = {"front": 3, "lower_coh": 2, "upper_coh": 1}
+    # colors = {"front": "blue", "lower_coh": "red", "upper_coh": "green"}
+    for kind, kind_data in data.groupby(level=0):
+        params = all_params[str(kind)]
+
+        kind_data = kind_data.loc[kind]
+        exact_data = kind_data[kind_data["exact"]]
+        plt.plot(kind_data.index, kind_data["median"], zorder=params["zorder"], color=params["color"], linestyle=":") 
+        plt.scatter(exact_data.index, exact_data["median"], zorder=params["zorder"], color=params["color"], s=6)
+        plt.plot(np.repeat(exact_data.index, 3), np.array((exact_data["lower"].values, exact_data["upper"].values, np.zeros(exact_data.shape[0]) + np.nan)).T.ravel(), zorder=params["zorder"], color=params["color"])
+
+    ymax = data[data["exact"]]["median"].max()
+    ymin = data[data["exact"]]["median"].min()
+    yrange = ymax - ymin
+
+    import matplotlib.dates as mdates
+    from matplotlib.ticker import StrMethodFormatter
+    plt.ylim(max(ymin - yrange * 0.1, 0), ymax + yrange * 0.2)
+    # yrange = plt.gca().get_ylim()[1] - data[data["exact"]]["median"].min()
+    # plt.ylim(max(plt.gca().get_ylim()[1] - (yrange * 1.1), 0), plt.gca().get_ylim()[1])
+
+    plt.xlim(np.min(data.index.get_level_values(1)), np.max(data.index.get_level_values(1)))
+
+    plt.text(0.5, 0.98, names.get(glacier, glacier.capitalize() + "breen"), transform=plt.gca().transAxes, va="top", ha="center")
+
+    xticks = plt.gca().get_xticks()
+
+    plt.xticks([int(xticks[1]), xticks[int(len(xticks) / 2)], xticks[-1]])
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+    plt.gca().yaxis.set_major_formatter(StrMethodFormatter('{x:,.0f}'))
+
+    if show:
+        plt.tight_layout()
+        plt.show()
+
+def old_plot_length_evolution(glacier: str = "arnesen"):
 
 
     gis_key = {
@@ -199,6 +392,13 @@ def plot_length_evolution(glacier: str = "kval"):
     Path("figures/").mkdir(exist_ok=True)
 
     fig = plt.figure(figsize=(8, 5))
+    # plt.subplot(1, 2, 1)
+    # all_idx = np.unique(np.r_[upper_coh_lengths["date"], lower_coh_lengths["date"]])
+    # all_coh = pd.DataFrame(index=all_idx)
+    # for name, df in [("lower", lower_coh_lengths), ("upper", upper_coh_lengths)]:
+    #     renamed = df.set_index("date").add_prefix(name + "_")
+    #     all_coh[renamed.columns] = renamed.reindex(all_idx).interpolate("linear").bfill().ffill()
+    # plt.fill_between(all_coh.index, all_coh["upper_median"] / 1e3, all_coh["lower_median"] / 1e3, color="gray")
     for data, params in [(front_lengths, {"color": "blue", "label": "Terminus", "zorder": 2, "key": "front"}), (lower_coh_lengths, {"color": "orange", "label": "Lower low-coh. bnd.", "zorder": 1, "key": "lower_coh"}), (upper_coh_lengths, {"color": "green", "label": "Upper low-coh. bnd.", "zorder": 1, "key": "upper_coh"})]:
         if data is None:
             continue
@@ -225,7 +425,29 @@ def plot_length_evolution(glacier: str = "kval"):
 
 def main():
 
-    plot_length_evolution()
+    fig = plt.figure(figsize=(8, 5), dpi=200)
+
+    glaciers = [
+        ["arnesen", "kval", "bore", "eton"],
+        ["natascha", "scheele", "vallakra", "penck"],
+    ]
+
+    n_rows = len(glaciers)
+    n_cols = max((len(col) for col in glaciers))
+
+    for row_n, row in enumerate(glaciers):
+        for col_n, glacier in enumerate(row):
+            plt.subplot(n_rows, n_cols, col_n + 1 + n_cols * row_n)
+            plot_length_evolution(glacier)
+
+            
+    # for i, glacier in enumerate(glaciers):
+    #     plt.subplot(1, 4, i +1)
+    plt.tight_layout(w_pad=-0.5, rect=(0.02, 0., 1., 1.))
+    plt.text(0.01, 0.5, "Distance (km)", rotation=90, ha="center", va="center", transform=fig.transFigure)
+
+    plt.savefig("figures/front_change.jpg", dpi=300)
+    plt.show()
 
 
 if __name__ == "__main__":
