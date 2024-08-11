@@ -98,12 +98,9 @@ def get_front_positions(glacier: str, gis_key: str | None = None):
         if "single positional indexer" not in str(exception):
             raise exception
         raise ValueError(f"No key {glacier} in low_coh_boundary") from exception
-    missing_date = low_coh_boundary["date"].isna()
 
-    low_coh_boundary.loc[missing_date, "date"] = pd.to_datetime(low_coh_boundary["year"].astype(str) + "-04-01")
     low_coh_boundary["date"] = pd.to_datetime(low_coh_boundary["date"])
-    # low_coh_boundary["date"] = pd.to_datetime(low_coh_boundary["year"].astype(str) + "-04-01")
-    
+   
     return front_positions, centerline, domain, low_coh_boundary
 
 
