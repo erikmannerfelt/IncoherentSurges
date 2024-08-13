@@ -1,0 +1,24 @@
+{
+"type": "FeatureCollection",
+"name": "glaciers",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::32633" } },
+"features": [
+{ "type": "Feature", "properties": { "key": "eton", "name": "Etonbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 641507.202040305826813, 8857514.521358765661716 ] } },
+{ "type": "Feature", "properties": { "key": "stone", "name": "Stonebreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 710749.551648738561198, 8646714.634300675243139 ] } },
+{ "type": "Feature", "properties": { "key": "delta", "name": "Deltabreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 695974.453824727330357, 8626430.717675900086761 ] } },
+{ "type": "Feature", "properties": { "key": "penck", "name": "Penckbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 515568.598820552811958, 8598647.802047776058316 ] } },
+{ "type": "Feature", "properties": { "key": "liestol", "name": "Liestølbreen", "enable": 0 }, "geometry": { "type": "Point", "coordinates": [ 540103.54035805480089, 8596259.585804667323828 ] } },
+{ "type": "Feature", "properties": { "key": "doktor", "name": "Doktorbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 538559.160520846606232, 8603105.80570157058537 ] } },
+{ "type": "Feature", "properties": { "key": "scheele", "name": "Scheelebreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 548016.496843543718569, 8630761.349796736612916 ] } },
+{ "type": "Feature", "properties": { "key": "natascha", "name": "Paulabreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 554584.091512083192356, 8630243.902944063767791 ] } },
+{ "type": "Feature", "properties": { "key": "morsnev", "name": "Moršnevbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 560825.296627398463897, 8619449.16552522405982 ] } },
+{ "type": "Feature", "properties": { "key": "kval", "name": "Kvalbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 571078.705031130695716, 8612029.773729978129268 ] } },
+{ "type": "Feature", "properties": { "key": "vallakra", "name": "Vallåkrabreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 549003.626224027248099, 8641802.86956069432199 ] } },
+{ "type": "Feature", "properties": { "key": "edvard", "name": "Edvardbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 561892.033215985517018, 8648107.760442493483424 ] } },
+{ "type": "Feature", "properties": { "key": "nordsyssel", "name": "Nordsysselbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 566413.722636264748871, 8646117.580239906907082 ] } },
+{ "type": "Feature", "properties": { "key": "arnesen", "name": "Arnesenbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 575488.94436006504111, 8642821.841824421659112 ] } },
+{ "type": "Feature", "properties": { "key": "sefstrom", "name": "Sefströmbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 480207.076980973768514, 8740762.589954162016511 ] } },
+{ "type": "Feature", "properties": { "key": "bore", "name": "Borebreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 475239.587195314699784, 8707916.65589065477252 ] } },
+{ "type": "Feature", "properties": { "key": "osborne", "name": "Osbornebreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 459811.710264854656998, 8729442.444961842149496 ] } }
+]
+}
