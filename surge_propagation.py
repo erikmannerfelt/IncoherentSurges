@@ -9,6 +9,9 @@ import fnmatch
 import rasterio
 import rasterio.features
 import itertools
+import projectfiles
+
+from main import CACHE_DIR
 
 S1_DIR = Path("/media/storage/Erik/Projects/UiO/S1_animation/")
 
@@ -82,6 +85,7 @@ def get_front_positions(glacier: str, gis_key: str | None = None):
 
     gis_dir = S1_DIR / f"GIS/shapes/{gis_key}/"
     front_positions = gpd.read_file(gis_dir / "front_positions.geojson")
+    front_positions["date"] = pd.to_datetime(front_positions["date"])
 
     try:
         centerline = gpd.read_file("GIS/shapes/centerlines.geojson").query(f"glacier == '{glacier}'").geometry.iloc[0]
@@ -147,7 +151,7 @@ def measure_velocity(lengths):
 
     return diff_per_day
 
-def get_length_evolution(glacier: str):
+def get_length_evolution(glacier: str, force_redo: bool = False):
     gis_key = {
         "vallakra": "vallakrabreen",
         "eton": "etonfront",
@@ -155,6 +159,17 @@ def get_length_evolution(glacier: str):
 
     # Load the digitized data
     front_positions, centerline, domain, coh_boundary = get_front_positions(glacier=glacier, gis_key=gis_key.get(glacier, glacier))
+
+    # print(front_positions.dtypes)
+    front_positions = front_positions.set_index("date", drop=False).resample("1M", label="right").first().dropna().reset_index(drop=True)
+    # print(front_positions)
+    # return
+
+    checksum =projectfiles.get_checksum([front_positions, centerline, domain, coh_boundary])
+
+    cache_filepath = CACHE_DIR / f"get_length_evolution/get_length_evolution-{glacier}-{checksum}.csv"
+    if cache_filepath.is_file() and not force_redo:
+        return pd.read_csv(cache_filepath, index_col=[0, 1], parse_dates=True, date_format="%Y-%m-%d")
 
     # Split the lower and upper coherence boundaries
     lower_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "lower"]
@@ -273,16 +288,206 @@ def get_length_evolution(glacier: str):
 
     data["surge_kind"] = "top-down" if top_down else "bottom-up"
 
+    cache_filepath.parent.mkdir(exist_ok=True, parents=True)
+    data.to_csv(cache_filepath)
+
+
     return data
     
 
+def get_all_length_evolution():
 
+    glaciers = gpd.read_file("GIS/shapes/glaciers.geojson")
+
+    data = {}
+    for key in glaciers["key"].values:
+        data[key] = get_length_evolution(key)
+    data = pd.concat(data, names=["key"])
+
+    data.index.names = ["key", "kind", "date"]
+
+    return data
+
+def render_stats_table(stats, out_filepath: Path | None = None, max_title_line_len: int = 8):
+
+    nice_names = {
+        "reaching_front": "Surge reaching front",
+        "surge_start": "Surge start",
+        "surge_termination": "Surge termination",
+        "surge_propagation_rate": "Surge propagation rate (m/d)",
+        "predicted_advance_date": "Predicted surge date",
+        "pre_surge_bulge_speed": "Bulge propagation rate (m/d)",
+        "surge_advance_rate": "Surge advance rate (m/d)",
+        "post_surge_stagnation_rate": "Post-surge stagnation rate (m/d)"
+    }
+
+    for key, name in nice_names.items():
+        if len(name) < max_title_line_len:
+            continue
+        words = name.split(" ")
+        new_name = r"\specialcell{"
+        lines = [words[0]]
+        for word in words[1:]:
+            if len(lines[-1]) >= max_title_line_len:
+                lines.append(word)
+            else:
+                lines[-1] += " " + word
+
+        nice_names[key] = r"\specialcell{" + "\\\\".join(lines) + "}"
+    glaciers = gpd.read_file("GIS/shapes/glaciers.geojson")
+    glacier_names = glaciers.set_index("key")["name"]
+    tex = [
+        r"% Needs 'booktabs' and the following command",
+        r"% \newcommand{\specialcell}[2][c]{\begin{tabular}[#1]{@{}c@{}}#2\end{tabular}}",
+        r"\begin{tabular}{l|" + "".join(["c"] * len(stats.columns)) + "}",
+        "\t\\toprule",
+        "\t" + r"\textbf{Glacier}&" + "&".join([r"\textbf{" + nice_names.get(col, col) + "}" for col in stats.columns]) + r"\\",
+        "\t\\midrule",
+    ]
+
+    for key, data in stats.iterrows():
+        row = [glacier_names[key]]
+
+        for _, value in data.items():
+            if pd.isna(value):
+                value = "--"
+            elif isinstance(value, pd.Timestamp):
+                months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                value = f"{months[value.month - 1]}. {value.year}"
+            elif isinstance(value, float):
+                value = round(value * 100) / 100
+            row.append(str(value))
+
+        tex.append("\t" + "&".join(row) + r"\\")
+        # tex.append([glacier_names[key]
+
+    tex += ["\t\\bottomrule", r"\end{tabular}"]
+
+    if out_filepath is not None:
+        with open(out_filepath, "w") as outfile:
+            outfile.write("\n".join(tex))
+
+    return "\n".join(tex)
+    
+
+def surge_statistics():
+
+    all_data = get_all_length_evolution()
+
+    top_down = all_data[all_data["surge_kind"] == "top-down"]
+    bottom_up = all_data[all_data["surge_kind"] == "bottom-up"]
+
+    top_down_stats = pd.DataFrame()
+    bottom_up_stats = pd.DataFrame()
+    for key, data in all_data.groupby(level=0):
+        print(key)
+        top_down = (data["surge_kind"] == "top-down").iloc[0]
+        data = data.droplevel(0)
+
+        if top_down:
+            stats = top_down_stats
+            reached_front = data.loc["lower_coh", "median"] >= (data.loc["front", "median"] * 0.98)
+            stage = reached_front.astype(int).diff().fillna(0).abs().cumsum()
+            if reached_front.iloc[0]:
+                stage += 1
+
+            # if reached_front.any():
+            #     stats.loc[key, "reaching_front"] = reached_front[reached_front].index[0]
+        else:
+            stats = bottom_up_stats
+
+            coh_zone_width = data.loc["front", "median"] - data.loc["upper_coh", "median"]
+            if key == "eton":
+                surge_start_date = pd.Timestamp("2023-11-11")
+            else:
+                coh_halfway = coh_zone_width > (0.5 * data.loc["front", "median"])
+                surge_start_date = coh_halfway[coh_halfway].index[0]
+
+            bottom_up_stats.loc[key, "surge_start"] = surge_start_date
+
+            stage = pd.Series(np.zeros(data.loc["lower_coh"].shape[0]), data.loc["lower_coh"].index)
+
+            stage.loc[slice(surge_start_date, None)] += 1
+
+            surge_stop = data.loc["lower_coh", "median"] < (data.loc["front", "median"] * 0.98)
+            if surge_stop.any():
+                stage.loc[slice(surge_stop[surge_stop].index[0], None)] += 1
+
+        if stage.max() > 2:
+            # print(reached_front)
+            print(stage)
+            raise NotImplementedError(f"{key} had more stages than expected")
+
+
+
+        pre_surge = data.loc[(slice(None), stage[stage == 0].index), :].sort_index()
+        surge = data.loc[(slice(None), stage[stage == 1].index), :].sort_index()
+        post_surge = data.loc[(slice(None), stage[stage == 2].index), :].sort_index()
+
+        if pre_surge.shape[0] > 0:
+            if top_down:
+                if surge.shape[0] > 0:
+                    way_pre_surge = data.sort_index(ascending=True).loc[(slice(None), slice(pre_surge.index.get_level_values(1).max() - pd.Timedelta(days=365), None)), :]
+                else:
+                    way_pre_surge = pre_surge
+
+                times = way_pre_surge.loc["lower_coh"].index.values.astype(float)
+                model = np.polyfit(times, (way_pre_surge.loc["front", "median"] - way_pre_surge.loc["lower_coh", "median"]).values, deg=1)
+                intercept_time = pd.Timestamp(-model[1] / model[0])
+
+                stats.loc[key, "pre_surge_bulge_speed"] = pre_surge.loc["lower_coh", "vel"].mean()
+                stats.loc[key, "predicted_advance_date"] = intercept_time
+
+        if surge.shape[0] > 0:
+            if top_down:
+                stats.loc[key, "reaching_front"] = surge.loc["lower_coh"].index[0]
+            first_year_surge = surge.loc[(slice(None), slice(None, surge.index.get_level_values(1).min() + pd.Timedelta(days=365 * 2))), :] 
+            if not top_down:
+                stats.loc[key, "surge_propagation_rate"] = -surge.loc["upper_coh", "vel"].mean()
+            stats.loc[key, "surge_advance_rate"] = first_year_surge.loc["front", "vel"].mean()
+
+        if post_surge.shape[0] > 0:
+            stats.loc[key, "surge_termination"] = post_surge.loc["lower_coh"][post_surge.loc["lower_coh", "exact"]].index[0]
+
+            stats.loc[key, "post_surge_stagnation_rate"] = post_surge.loc["lower_coh", "vel"].mean() * -1
+
+
+    
+    top_down_stats = top_down_stats.sort_values("reaching_front")
+    bottom_up_stats = bottom_up_stats.sort_values("surge_start")
+    # print(stats.rename(columns=nice_names))
+    tables_dir = Path("tables")
+    tables_dir.mkdir(exist_ok=True)
+    tex = render_stats_table(top_down_stats, tables_dir / "top_down_surge_stats.tex", 5)
+
+    tex2 = render_stats_table(bottom_up_stats, tables_dir / "bottom_up_surge_stats.tex")
+    print(tex)
+        
+
+    return
+
+    # for key, data
+    # Check when the top-down low coherence fronts first reached 97% of the glacier length.
+    reaching_front = top_down.loc[(slice(None), "lower_coh", slice(None)), "median"].droplevel(1) >= (top_down.loc[(slice(None), "front", slice(None)), "median"].droplevel(1) * 0.97)
+    reaching_front = reaching_front[reaching_front].groupby(level=0).apply(lambda s: s.index.get_level_values(1)[0])
+
+    # print(top_down.loc[(slice(None), "lower_coh", slice(None))].groupby(level=0).apply(lambda df: print(df.index.get_level_values(0)))
+    # print(top_down.loc[(slice(None), "lower_coh", slice(None))].index)
+
+
+        
 def plot_length_evolution(glacier: str = "arnesen", show: bool = False):
 
-    names = {
-        "vallakra": "Vallåkrabreen",
-        "natascha": "Paulabreen",
-    }
+
+    try:
+        name = gpd.read_file("GIS/shapes/glaciers.geojson").query(f"key == '{glacier}'").iloc[0]["name"]
+    except IndexError as exception:
+        raise ValueError(f"Key '{glacier}' not in glaciers.geojson") from exception
+    # names = {
+    #     "vallakra": "Vallåkrabreen",
+    #     "natascha": "Paulabreen",
+    #     "sefstrom": "Sefströmbreen",
+    # }
 
     data = get_length_evolution(glacier=glacier)
     
@@ -321,13 +526,17 @@ def plot_length_evolution(glacier: str = "arnesen", show: bool = False):
 
     import matplotlib.dates as mdates
     from matplotlib.ticker import StrMethodFormatter
-    plt.ylim(max(ymin - yrange * 0.1, 0), ymax + yrange * 0.2)
+    if glacier in ["eton"]:
+        plt.ylim(max(ymin - yrange * 0.4, 0), ymax + yrange * 0.2)
+    else:
+        plt.ylim(0, ymax * 1.15)
+    # plt.ylim(0 if glacier not in ["eton"] else max(ymin - yrange * 0.1, 0), ymax )
     # yrange = plt.gca().get_ylim()[1] - data[data["exact"]]["median"].min()
     # plt.ylim(max(plt.gca().get_ylim()[1] - (yrange * 1.1), 0), plt.gca().get_ylim()[1])
 
     plt.xlim(np.min(data.index.get_level_values(1)), np.max(data.index.get_level_values(1)))
 
-    plt.text(0.5, 0.98, names.get(glacier, glacier.capitalize() + "breen"), transform=plt.gca().transAxes, va="top", ha="center")
+    plt.text(0.5, 0.97, name, transform=plt.gca().transAxes, va="top", ha="center")
 
     xticks = plt.gca().get_xticks()
 
@@ -424,22 +633,24 @@ def old_plot_length_evolution(glacier: str = "arnesen"):
     plt.savefig(f"figures/{glacier}_front_change.jpg", dpi=300)
     plt.show()
 
-def main():
-
-    fig = plt.figure(figsize=(8, 5), dpi=200)
-
+def plot_multi_front_evolution(show: bool = True):
     glaciers = [
-        ["arnesen", "kval", "bore", "eton"],
-        ["natascha", "scheele", "vallakra", "penck"],
+        ["arnesen", "osborne", "kval", "stone"],
+        ["eton", "bore", "morsnev", "penck"],
+        ["scheele", "vallakra", "delta", "natascha"],
+        ["nordsyssel", "sefstrom", "doktor", "edvard"],
     ]
+    fig = plt.figure(figsize=(8, 2 * len(glaciers)), dpi=100)
 
     n_rows = len(glaciers)
     n_cols = max((len(col) for col in glaciers))
 
     for row_n, row in enumerate(glaciers):
         for col_n, glacier in enumerate(row):
-            plt.subplot(n_rows, n_cols, col_n + 1 + n_cols * row_n)
+            i = col_n + n_cols * row_n
+            plt.subplot(n_rows, n_cols, i + 1)
             plot_length_evolution(glacier)
+            plt.text(0.01, 0.99, "abcdefghijklmnopqrstuvx"[i] + ")", transform=plt.gca().transAxes, fontsize=9, ha="left", va="top")
 
             
     # for i, glacier in enumerate(glaciers):
@@ -448,7 +659,15 @@ def main():
     plt.text(0.01, 0.5, "Distance (km)", rotation=90, ha="center", va="center", transform=fig.transFigure)
 
     plt.savefig("figures/front_change.jpg", dpi=300)
-    plt.show()
+    if show:
+        plt.show()
+    plt.close()
+    
+
+def main():
+    plot_multi_front_evolution()
+
+
 
 
 def load_coh(glacier: str):
