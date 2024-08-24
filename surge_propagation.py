@@ -5,9 +5,13 @@ import geopandas as gpd
 import pandas as pd
 import glacier_lengths
 import shapely
+import shapely.geometry
+import shapely.ops
 import fnmatch
 import rasterio
 import rasterio.features
+import rasterio.warp
+import rasterio.transform
 import itertools
 import projectfiles
 
@@ -15,45 +19,75 @@ from main import CACHE_DIR
 
 S1_DIR = Path("/media/storage/Erik/Projects/UiO/S1_animation/")
 
+GIS_KEYS = {
+    "vallakra": "vallakrabreen",
+    "eton": "etonfront",
+}
+
 
 def measure_lengths(
     positions: gpd.GeoDataFrame,
     centerline: shapely.geometry.LineString,
     domain: shapely.geometry.Polygon,
     radius: float = 200.0,
-):
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Measure lengths of the provided (front) position linestrings.
+
+    The centerline is buffered with the given radius and cut to the domain.
+    Then, the buffered centerlines are used for measuring the front position lengths.
+
+    Parameters
+    ----------
+    positions
+        (Front) position linestrings to measure lengths of. It is assumed to contain two columns: ["date", "goemetry"]
+    centerline
+        The centerline to measure lengths along. NOTE: Direction is important; the start vertex indicates the start.
+    domain
+        The domain to use for cutting the buffered centerlines properly.
+    radius
+        The radius (distance to the original centerline) at which to measure.
+
+    Returns
+    -------
+    The raw lengths measurements (described below) and aggregate length statistics for each position.
+
+    They come in the order "(raw, aggregates)".
+
+    Raw length measurements are for each individual buffered centerline. These are optimal for measuring velocities.
+
+    """
     buffered_centerlines = glacier_lengths.buffer_centerline(centerline, domain, max_radius=radius)
 
+    # Initialize the raw length measurement data
     lengths = []
-    for i, position in positions.iterrows():
-        for j, line in enumerate(buffered_centerlines.geoms):
+    for _, position in positions.iterrows():
+        for i, line in enumerate(buffered_centerlines.geoms):
             # cut = glacier_lengths.cut_centerlines(line, position.geometry, max_difference_fraction=0.005)
 
+            # Split the front position using the centerline. Assuming they overlap, it will generate AT LEAST two lines.
             cut_geoms = shapely.ops.split(line, position.geometry)
 
+            # Loop through all cut lines and find the one that is connected to the start vertex (the beginning).
             for cut in cut_geoms.geoms:
                 if line.coords[-1][0] == cut.coords[-1][0] and line.coords[-1][1] == cut.coords[-1][1]:
                     break
             else:
+                # This might get triggered if the centerline and front position don't overlap..
                 raise NotImplementedError("Line was not cut properly")
 
-            cut_lengths = glacier_lengths.measure_lengths(cut)
-
+            cut_length = glacier_lengths.measure_lengths(cut)[0]
             lengths.append(
                 {
-                    "line_i": j,
+                    "line_i": i,
                     "date": position.date,
-                    "length": cut_lengths[0],
-                    # "median": np.median(cut_lengths),
-                    # "std": np.std(cut_lengths),
-                    # "upper": np.percentile(cut_lengths, 75),
-                    # "lower": np.percentile(cut_lengths, 25),
+                    "length": cut_length,
                 }
             )
 
     lengths = pd.DataFrame.from_records(lengths)
     lengths["date"] = pd.to_datetime(lengths["date"])
 
+    # Aggregate the length data for each original line
     lengths_agg = []
     for date, values in lengths.groupby("date"):
         lengths_agg.append(
@@ -71,29 +105,59 @@ def measure_lengths(
     return lengths, lengths_agg
 
 
-def get_front_positions(glacier: str, gis_key: str | None = None):
-    if gis_key is None:
-        gis_key = glacier
+def get_glacier_data(
+    glacier: str,
+) -> tuple[gpd.GeoDataFrame, shapely.geometry.LineString, shapely.geometry.Polygon, gpd.GeoDataFrame]:
+    """Load data about a glacier from its key.
+
+    Note that the data are loaded from two places; "GIS/shapes/" and the directory defined by `S1_DIR`.
+
+    Parameters
+    ----------
+    glacier
+        The glacier key (e.g. "eton"). It's GIS key may be different and is defined in `GIS_KEYS`.
+
+    Returns
+    -------
+    A tuple of data in the following form:
+    1. Front positions. Linestrings with a "date" field to separate them.
+    2. Centerline. The glacier centerline linestring.
+    3. Domain. The evaluation domain to cut the buffered centerlines within.
+    4. Low-coherence boundaries. The measured upper/lower boundaries of a low-coherence front.
+
+    """
+    gis_key = GIS_KEYS.get(glacier, glacier)
 
     gis_dir = S1_DIR / f"GIS/shapes/{gis_key}/"
     front_positions = gpd.read_file(gis_dir / "front_positions.geojson")
     front_positions["date"] = pd.to_datetime(front_positions["date"])
 
+    crs = front_positions.crs
+
     try:
-        centerline = gpd.read_file("GIS/shapes/centerlines.geojson").query(f"glacier == '{glacier}'").geometry.iloc[0]
+        centerline = (
+            gpd.read_file("GIS/shapes/centerlines.geojson")
+            .query(f"glacier == '{glacier}'")
+            .to_crs(crs)
+            .geometry.iloc[0]
+        )
     except IndexError as exception:
         if "single positional indexer" not in str(exception):
             raise exception
         raise ValueError(f"No key {glacier} in centerlines") from exception
     try:
-        domain = gpd.read_file("GIS/shapes/domains.geojson").query(f"glacier == '{glacier}'").geometry.iloc[0]
+        domain = (
+            gpd.read_file("GIS/shapes/domains.geojson").query(f"glacier == '{glacier}'").to_crs(crs).geometry.iloc[0]
+        )
     except IndexError as exception:
         if "single positional indexer" not in str(exception):
             raise exception
         raise ValueError(f"No key {glacier} in domain") from exception
 
     try:
-        low_coh_boundary = gpd.read_file("GIS/shapes/low_coh_boundaries.geojson").query(f"glacier == '{glacier}'")
+        low_coh_boundary = (
+            gpd.read_file("GIS/shapes/low_coh_boundaries.geojson").query(f"glacier == '{glacier}'").to_crs(crs)
+        )
     except IndexError as exception:
         if "single positional indexer" not in str(exception):
             raise exception
@@ -104,15 +168,32 @@ def get_front_positions(glacier: str, gis_key: str | None = None):
     return front_positions, centerline, domain, low_coh_boundary
 
 
-def measure_velocity(lengths):
-    dates = np.sort(lengths["date"].unique())
+def measure_velocity(raw_lengths: pd.DataFrame) -> pd.DataFrame:
+    """Measure length advance/retreat velocities.
 
+    The lower/upper columns represent the 25th/75th percentiles.
+
+    Parameters
+    ----------
+    raw_lengths
+        The raw length measurements for each cut centerline. See `measure_lengths()`.
+
+    Returns
+    -------
+    Aggregated velocity statistics in m/d.
+
+    """
+    # Generate the intervals at which to calculate velocities.
+    dates = np.sort(raw_lengths["date"].unique())
     diff_intervals = pd.IntervalIndex.from_arrays(left=dates[:-1], right=dates[1:])
 
     diffs = []
-    for i, interval in enumerate(diff_intervals):
-        before_vals = lengths[lengths["date"] == interval.left].set_index("line_i")
-        after_vals = lengths[lengths["date"] == interval.right].set_index("line_i")
+    for interval in diff_intervals:
+        # Extract the before and after lengths and set the index to the centerline it was measured on.
+        # This means that upon subsequent subtraction, differences are only measured along the same centerlines, not...
+        # ... between different centerlines. This ensures proper resultant spreads.
+        before_vals = raw_lengths[raw_lengths["date"] == interval.left].set_index("line_i")
+        after_vals = raw_lengths[raw_lengths["date"] == interval.right].set_index("line_i")
 
         diff = (after_vals - before_vals).dropna()
 
@@ -133,6 +214,7 @@ def measure_velocity(lengths):
 
     diffs = pd.DataFrame.from_records(diffs).set_index("date").sort_index()
 
+    # Convert the differences to velocities in m/d
     diff_per_day = diffs / np.repeat(
         ((diffs.index.right - diffs.index.left).total_seconds() / (3600 * 24)).values[:, None], diffs.shape[1], 1
     )
@@ -141,23 +223,31 @@ def measure_velocity(lengths):
     diff_per_day["date_from"] = diff_per_day.index.left
     diff_per_day["date_to"] = diff_per_day.index.right
 
-    # diff_per_day = diff_per_day.set_index(diff_per_day.index.mid).resample("1M").mean().dropna()
-
     return diff_per_day
 
 
-def get_length_evolution(glacier: str, force_redo: bool = False):
-    gis_key = {
-        "vallakra": "vallakrabreen",
-        "eton": "etonfront",
-    }
+def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame:
+    """Get the formatted length (terminus and low-coherence front) evolution data.
 
+    Parameters
+    ----------
+    glacier
+        The identifier key of the glacier.
+    force_redo
+        Ignore any previous cached result and redo it.
+
+    Returns
+    -------
+    A table of lengths (in km), velocities (m/d) of the different fronts along the glacier.
+    The "kind" multiindex specifies the type of front:
+    - "front": The terminus
+    - "upper_coh": The upper boundary of a low-coherence front.
+    - "lower_coh": The lower boundary of a low-coherence front.
+
+    """
     # Load the digitized data
-    front_positions, centerline, domain, coh_boundary = get_front_positions(
-        glacier=glacier, gis_key=gis_key.get(glacier, glacier)
-    )
+    front_positions, centerline, domain, coh_boundary = get_glacier_data(glacier=glacier)
 
-    # print(front_positions.dtypes)
     front_positions = (
         front_positions.set_index("date", drop=False)
         .resample("1M", label="right")
@@ -165,27 +255,28 @@ def get_length_evolution(glacier: str, force_redo: bool = False):
         .dropna()
         .reset_index(drop=True)
     )
-    # print(front_positions)
-    # return
 
+    # Load the results from cache if it exists and the inputs have not changed.
     checksum = projectfiles.get_checksum([front_positions, centerline, domain, coh_boundary])
-
     cache_filepath = CACHE_DIR / f"get_length_evolution/get_length_evolution-{glacier}-{checksum}.csv"
     if cache_filepath.is_file() and not force_redo:
         return pd.read_csv(cache_filepath, index_col=[0, 1], parse_dates=True, date_format="%Y-%m-%d")
 
     # Split the lower and upper coherence boundaries
-    lower_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "lower"]
-    upper_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "upper"]
+    lower_coh_boundary: gpd.GeoDataFrame = coh_boundary.query("boundary_type == 'lower'")
+    upper_coh_boundary: gpd.GeoDataFrame = coh_boundary.query("boundary_type == 'upper'")
+
+    lengths_raw: dict[str, pd.DataFrame] = {}
 
     # Calculate the glacier front lengths
-    front_lengths_raw, front_lengths = measure_lengths(front_positions, centerline, domain)
+    lengths_raw["front"], front_lengths = measure_lengths(front_positions, centerline, domain)
+
     front_lengths = front_lengths.set_index("date")
 
     # The final output index will be conformed to this date list
     all_dates = np.unique(np.r_[coh_boundary["date"], front_lengths.index])
 
-    def to_multiindex(df, name: str, mi_name: str = "kind"):
+    def to_multiindex(df: pd.DataFrame, name: str, mi_name: str = "kind") -> pd.DataFrame:
         """From https://stackoverflow.com/a/42094658."""
         return pd.concat({name: df}, names=[mi_name])
 
@@ -198,14 +289,14 @@ def get_length_evolution(glacier: str, force_redo: bool = False):
 
     # If there are data on the lower coherence boundary, add them.
     if lower_coh_boundary.shape[0] > 0:
-        lower_coh_lengths_raw, lower_coh_lengths = measure_lengths(lower_coh_boundary, centerline, domain)
+        lengths_raw["lower_coh"], lower_coh_lengths = measure_lengths(lower_coh_boundary, centerline, domain)
         lower_coh_lengths["exact"] = True
 
         data = pd.concat([data, to_multiindex(lower_coh_lengths.set_index("date"), "lower_coh")], join="outer")
 
     # If there are data on the upper coherence boundary, add them.
     if upper_coh_boundary.shape[0] > 0:
-        upper_coh_lengths_raw, upper_coh_lengths = measure_lengths(upper_coh_boundary, centerline, domain)
+        lengths_raw["upper_coh"], upper_coh_lengths = measure_lengths(upper_coh_boundary, centerline, domain)
         upper_coh_lengths["exact"] = True
         data = pd.concat([data, to_multiindex(upper_coh_lengths.set_index("date"), "upper_coh")], join="outer")
 
@@ -239,12 +330,23 @@ def get_length_evolution(glacier: str, force_redo: bool = False):
             front_data = data.loc["front"].copy()
             front_data["exact"] = False
             data = pd.concat([data, to_multiindex(front_data, "lower_coh")])
+            lengths_raw["lower_coh"] = lengths_raw["front"]
         # If there is a boundary, assume that it starts at the terminus but then moves up-glacier;
         # It will be equal to the terminus before the measurements and interpolated/ffilled after.
         else:
             idx = data.loc["lower_coh"].index
+            # The index to interpolate is everything after the first "lower_coh" measurement
             new_idx = all_dates[all_dates >= idx.min()]
 
+            new_idx_vals = all_dates[~pd.Index(all_dates).isin(idx)]
+            lengths_raw["lower_coh"] = pd.concat(
+                [
+                    lengths_raw["front"][lengths_raw["front"]["date"].isin(new_idx_vals)],
+                    lengths_raw["lower_coh"]
+                ]
+            ).sort_values("date")
+
+            # Interpolate the values in between
             lower_coh = (
                 data.loc["lower_coh"].drop(columns="exact").reindex(new_idx).interpolate("slinear").bfill().ffill()
             )
@@ -282,16 +384,36 @@ def get_length_evolution(glacier: str, force_redo: bool = False):
     # Calculate front propagation velocities in m/d
     dt_days = pd.Series(data.loc["front"].index, data.loc["front"].index).diff().dt.total_seconds() / (3600 * 24)
     for kind, kind_data in data.groupby(level=0):
-        shifted = kind_data.shift(1)
-        dt_days_multi = to_multiindex(dt_days, str(kind))
+        # if kind not in lengths_raw:
+        #     continue
 
-        data.loc[kind, "vel"] = (kind_data["median"] - shifted["median"]) / dt_days_multi
+        if True:
+            vel_cols = ["upper", "lower", "std"]
 
-        vel_upper = kind_data["upper"] - shifted["upper"]
-        vel_lower = kind_data["lower"] - shifted["lower"]
+            if (kind_data["median"] == 0.).all():
+                data.loc[kind, ["vel"] + [f"vel_{key}" for key in vel_cols]] = 0
+                continue
+            
 
-        data.loc[kind, "vel_upper"] = np.where(vel_upper > vel_lower, vel_upper, vel_lower) / dt_days_multi
-        data.loc[kind, "vel_lower"] = np.where(vel_upper > vel_lower, vel_lower, vel_upper) / dt_days_multi
+            velocities = measure_velocity(lengths_raw[kind]).set_index("date_to")
+            velocities.index.name = "date"
+            velocities = to_multiindex(velocities.reindex(all_dates).interpolate().ffill().bfill(), kind)
+
+            data.loc[kind, "vel"] = velocities["median"]
+
+            for key in vel_cols:
+                data.loc[kind, f"vel_{key}"] = velocities[key]
+        else:
+            shifted = kind_data.shift(1)
+            dt_days_multi = to_multiindex(dt_days, str(kind))
+
+            data.loc[kind, "vel"] = (kind_data["median"] - shifted["median"]) / dt_days_multi
+
+            vel_upper = kind_data["upper"] - shifted["upper"]
+            vel_lower = kind_data["lower"] - shifted["lower"]
+
+            data.loc[kind, "vel_upper"] = np.where(vel_upper > vel_lower, vel_upper, vel_lower) / dt_days_multi
+            data.loc[kind, "vel_lower"] = np.where(vel_upper > vel_lower, vel_lower, vel_upper) / dt_days_multi
 
     # Convert units from m to km
     data[num_cols] /= 1000
@@ -304,12 +426,12 @@ def get_length_evolution(glacier: str, force_redo: bool = False):
     return data
 
 
-def get_all_length_evolution():
+def get_all_length_evolution(force_redo: bool = False):
     glaciers = gpd.read_file("GIS/shapes/glaciers.geojson")
 
     data = {}
     for key in glaciers["key"].values:
-        data[key] = get_length_evolution(key)
+        data[key] = get_length_evolution(key, force_redo=force_redo)
     data = pd.concat(data, names=["key"])
 
     data.index.names = ["key", "kind", "date"]
@@ -381,8 +503,8 @@ def render_stats_table(stats, out_filepath: Path | None = None, max_title_line_l
     return "\n".join(tex)
 
 
-def surge_statistics():
-    all_data = get_all_length_evolution()
+def surge_statistics(force_redo: bool = False):
+    all_data = get_all_length_evolution(force_redo=force_redo)
 
     idx = (slice(None), "lower_coh", slice(None))
 
@@ -558,7 +680,7 @@ def surge_statistics():
             if top_down:
                 stats.loc[key, "reaching_front"] = surge.loc["lower_coh"].index[0]
             first_year_surge = surge.loc[
-                (slice(None), slice(None, surge.index.get_level_values(1).min() + pd.Timedelta(days=365 * 2))), :
+                (slice(None), slice(None, surge.index.get_level_values(1).min() + pd.Timedelta(days=365 * 1))), :
             ]
             if not top_down:
                 stats.loc[key, "surge_propagation_rate"] = -surge.loc["upper_coh", "vel"].mean()
@@ -688,15 +810,9 @@ def plot_length_evolution(glacier: str = "arnesen", show: bool = False):
 
 
 def old_plot_length_evolution(glacier: str = "arnesen"):
-    gis_key = {
-        "vallakra": "vallakrabreen",
-        "eton": "etonfront",
-    }
     buffer_radius = 200 if glacier not in ["basin3"] else 2000.0
 
-    front_positions, centerline, domain, coh_boundary = get_front_positions(
-        glacier=glacier, gis_key=gis_key.get(glacier, glacier)
-    )
+    front_positions, centerline, domain, coh_boundary = get_glacier_data(glacier=glacier)
 
     lower_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "lower"]
     upper_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "upper"]
@@ -843,11 +959,6 @@ def main():
 
 
 def load_coh(glacier: str):
-    gis_key = {
-        "vallakra": "vallakrabreen",
-        "eton": "etonfront",
-    }
-
     default_files_hh = {
         2016: [
             "*S1AA_20160329*HH*",
@@ -876,9 +987,7 @@ def load_coh(glacier: str):
         ],
     }
 
-    front_positions, centerline, domain, coh_boundary = get_front_positions(
-        glacier=glacier, gis_key=gis_key.get(glacier, glacier)
-    )
+    front_positions, centerline, domain, coh_boundary = get_glacier_data(glacier=glacier)
 
     bounds = rasterio.coords.BoundingBox(*domain.buffer(200).bounds)
 
