@@ -16,19 +16,6 @@ from main import CACHE_DIR
 S1_DIR = Path("/media/storage/Erik/Projects/UiO/S1_animation/")
 
 def measure_lengths(positions: gpd.GeoDataFrame, centerline: shapely.geometry.LineString, domain: shapely.geometry.Polygon, radius: float = 200.):
-    # centerline = shapely.from_wkt(centerline.wkt)
-    # glacier_dir = S1_DIR / f"GIS/shapes/{glacier}"
-
-    # cache_filepath = S1_dir / f"output/{glacier}/{glacier}_lengths.csv"
-
-
-    # positions = gpd.read_file(filepath)
-
-    # centerline_shp = gpd.read_file(glacier_dir / "centerline.geojson")
-    # centerline = centerline_shp.iloc[0].geometry
-
-    # domain_shp = gpd.read_file(glacier_dir / "domain.geojson")
-    # domain = domain_shp.iloc[0].geometry
 
     buffered_centerlines = glacier_lengths.buffer_centerline(centerline, domain, max_radius=radius)
 
@@ -374,8 +361,91 @@ def surge_statistics():
 
     all_data = get_all_length_evolution()
 
+    idx = (slice(None), "lower_coh", slice(None))
+
+    def get_col(kind: str, col: str = "median", data: pd.DataFrame = all_data) -> pd.Series:
+        return data.loc[(slice(None), kind, slice(None)), col].droplevel(1)
+    coh_zone_length = (get_col("lower_coh") - get_col("upper_coh"))
+    coh_zone_frac = coh_zone_length / get_col("front")
+
+    # Really messy way to reindex to include the "kind", and repeat the values over that axis.
+    for key, data in [("coh_zone_frac", coh_zone_frac), ("coh_zone_length", coh_zone_length)]:
+        all_data[key] = pd.concat({key: data for key in np.unique(all_data.index.get_level_values("kind"))}, names=["kind"]).reorder_levels(all_data.index.names).reindex(all_data.index)
+    # print(all_data.loc[(slice(None), "front"
+
+
     top_down = all_data[all_data["surge_kind"] == "top-down"]
     bottom_up = all_data[all_data["surge_kind"] == "bottom-up"]
+
+    plt.figure(figsize=(8, 5))
+
+    length_data = (get_col("front", "coh_zone_length", bottom_up)).values
+    vel_data = (get_col("front", "vel", bottom_up)).values
+    valid_mask = np.isfinite(vel_data)
+    frac_data = length_data[valid_mask]
+    vel_data = vel_data[valid_mask]
+
+    # binsize = 10
+    # bins = np.arange(0, 100 + binsize, binsize)
+    bins = np.linspace(0, length_data.max() + 1, num=11)
+    binsize = np.mean(np.diff(bins))
+    dig = np.digitize(frac_data, bins)
+    xmid = (bins[1:] - np.diff(bins) / 2)[np.unique(dig) - 1]
+    binned_vel = [vel_data[dig == i] for i in np.unique(dig)]
+
+    advancing_mask = np.array([np.median(vals) for vals in binned_vel]) > 0.15
+    # bottom_up_surge_threshold = bins[1:][advancing_mask][0] / 100
+    # bottom_up_surge_threshold = xmid[advancing_mask][0] / 100
+    bottom_up_surge_length_threshold = bins[:-1][advancing_mask][0]
+
+    print(f"Bottom-up surges start at {bottom_up_surge_length_threshold:.2f}km of low-coh progression")
+
+    plt.hlines(0, bins[0], bins[-1], color="black", linestyles=":", alpha=0.4)
+    box_width = binsize / 2
+    plt.boxplot(binned_vel, positions=xmid, widths=box_width, manage_ticks=False, medianprops={"color": "blue"}, **{f"{k}props": {"color": "royalblue"} for k in ["box", "flier", "whisker", "cap"]})
+
+    for i, vals in enumerate(binned_vel):
+        med = np.median(vals)
+        plt.text(xmid[i], med, f"{med:.1f} m/d", ha="center", va="center", fontsize=6) 
+
+    plt.xlabel("Low-coherence zone length (km)")
+    plt.ylabel("Advance/retreat rate (m/d)")
+    plt.tight_layout()
+    plt.xlim(xmid[0] - box_width, xmid[-1] + box_width)
+    # plt.xticks(xmid, labels=[f"{bins[i]}-{min(bins[i + 1], 100)}" for i in range(len(xmid))])
+    plt.savefig("figures/bottom_up_vel_vs_coh_length.jpg", dpi=300)
+    plt.close()
+
+    plt.figure(figsize=(8, 5))
+
+    frac_data = (get_col("front", "coh_zone_frac", bottom_up.drop("eton")) * 100).values
+    vel_data = (get_col("front", "vel", bottom_up.drop("eton"))).values
+    valid_mask = np.isfinite(vel_data)
+    frac_data = frac_data[valid_mask]
+    vel_data = vel_data[valid_mask]
+
+    binsize = 10
+    bins = np.arange(0, 100 + binsize, binsize)
+    dig = np.digitize(frac_data, bins)
+    xmid = (bins[1:] - np.diff(bins) / 2)[np.unique(dig) - 1]
+    binned_vel = [vel_data[dig == i] for i in np.unique(dig)]
+
+    advancing_mask = np.array([np.median(vals) for vals in binned_vel]) > 0.1
+    bottom_up_surge_frac_threshold = bins[1:][advancing_mask][0] / 100
+    # bottom_up_surge_threshold = xmid[advancing_mask][0] / 100
+
+    print(f"Bottom-up surges start at {bottom_up_surge_frac_threshold * 100}% low-coh coverage")
+
+    plt.hlines(0, bins[0], bins[-1], color="black", linestyles=":", alpha=0.4)
+    box_width = binsize / 2
+    plt.boxplot(binned_vel, positions=xmid, widths=5, manage_ticks=False)
+
+    plt.xlabel("Fraction of glacier covered (%)")
+    plt.ylabel("Advance/retreat rate (m/d)")
+    plt.tight_layout()
+    plt.xlim(xmid[0] - box_width, xmid[-1] + box_width)
+    plt.xticks(xmid, labels=[f"{bins[i]}-{min(bins[i + 1], 100)}" for i in range(len(xmid))])
+    plt.savefig("figures/bottom_up_vel_vs_coh_frac.jpg", dpi=300)
 
     top_down_stats = pd.DataFrame()
     bottom_up_stats = pd.DataFrame()
@@ -400,8 +470,10 @@ def surge_statistics():
             if key == "eton":
                 surge_start_date = pd.Timestamp("2023-11-11")
             else:
-                coh_halfway = coh_zone_width > (0.5 * data.loc["front", "median"])
-                surge_start_date = coh_halfway[coh_halfway].index[0]
+                surge_start_date = data.loc["front", "coh_zone_frac"].pipe(lambda f: f[f > bottom_up_surge_frac_threshold]).sort_index().index[0]
+
+                # coh_is_surge = coh_zone_width > bottom_up_surge_length_threshold
+                # surge_start_date = coh_is_surge[coh_is_surge].index[0]
 
             bottom_up_stats.loc[key, "surge_start"] = surge_start_date
 
@@ -458,10 +530,21 @@ def surge_statistics():
     # print(stats.rename(columns=nice_names))
     tables_dir = Path("tables")
     tables_dir.mkdir(exist_ok=True)
-    tex = render_stats_table(top_down_stats, tables_dir / "top_down_surge_stats.tex", 5)
+    _tex = render_stats_table(top_down_stats, tables_dir / "top_down_surge_stats.tex", 5)
+    _tex2 = render_stats_table(bottom_up_stats, tables_dir / "bottom_up_surge_stats.tex")
 
-    tex2 = render_stats_table(bottom_up_stats, tables_dir / "bottom_up_surge_stats.tex")
-    print(tex)
+    print("Top-down")
+    print(top_down_stats.select_dtypes(np.number).describe())
+
+    print(top_down_stats["pre_surge_bulge_speed"].corr(top_down_stats["surge_advance_rate"]))
+
+    print("Bottom-up")
+    print(bottom_up_stats.select_dtypes(np.number).describe())
+
+    print("Combined")
+    print(pd.concat([top_down_stats, bottom_up_stats], join="inner").select_dtypes(np.number).describe())
+
+    
         
 
     return
@@ -555,20 +638,21 @@ def old_plot_length_evolution(glacier: str = "arnesen"):
         "vallakra": "vallakrabreen",
         "eton": "etonfront",
     }
+    buffer_radius = 200 if glacier not in ["basin3"] else 2000.
 
     front_positions, centerline, domain, coh_boundary = get_front_positions(glacier=glacier, gis_key=gis_key.get(glacier, glacier))
 
     lower_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "lower"]
     upper_coh_boundary = coh_boundary[coh_boundary["boundary_type"] == "upper"]
     
-    front_lengths_raw, front_lengths = measure_lengths(front_positions, centerline, domain)
+    front_lengths_raw, front_lengths = measure_lengths(front_positions, centerline, domain, buffer_radius)
 
     velocities = {
         "front": measure_velocity(front_lengths_raw)
     }
 
     try:
-        lower_coh_lengths_raw, lower_coh_lengths = measure_lengths(lower_coh_boundary, centerline, domain)
+        lower_coh_lengths_raw, lower_coh_lengths = measure_lengths(lower_coh_boundary, centerline, domain,buffer_radius)
 
         advancing_dates = velocities["front"][velocities["front"]["median"] > 0.2]["date_to"].astype("str").values
         advancing_front_positions = front_lengths[front_lengths["date"].isin(advancing_dates)]
@@ -590,7 +674,7 @@ def old_plot_length_evolution(glacier: str = "arnesen"):
         lower_coh_lengths_raw = lower_coh_lengths = None
 
     try:
-        upper_coh_lengths_raw, upper_coh_lengths = measure_lengths(upper_coh_boundary, centerline, domain)
+        upper_coh_lengths_raw, upper_coh_lengths = measure_lengths(upper_coh_boundary, centerline, domain, buffer_radius)
         velocities["upper_coh"] = measure_velocity(upper_coh_lengths_raw)
         # print(upper_coh_lengths_raw)
     except KeyError:
@@ -630,7 +714,7 @@ def old_plot_length_evolution(glacier: str = "arnesen"):
 
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"figures/{glacier}_front_change.jpg", dpi=300)
+    # plt.savefig(f"figures/{glacier}_front_change.jpg", dpi=300)
     plt.show()
 
 def plot_multi_front_evolution(show: bool = True):
