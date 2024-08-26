@@ -25,6 +25,60 @@ GIS_KEYS = {
 }
 
 
+def order_surges(glaciers: list[str], all_default: bool = False) -> list[str]:
+    """Sort the glacier key list in a predefined order.
+
+    If they are not in the list, they get appended at the end, sorted alphabetically.
+
+    Examples
+    --------
+    >>> order_surges(["b", "a"])
+    ['a', 'b']
+
+    >>> order_surges(["kval", "osborne", "b", "a"])
+    ['osborne', 'kval', 'a', 'b']
+
+    """
+    glaciers = glaciers.copy()
+    preordered = [
+        "arnesen",
+        "osborne",
+        "kval",
+        "stone",
+        "eton",
+        "bore",
+        "morsnev",
+        "penck",
+        "scheele",
+        "vallakra",
+        "delta",
+        "natascha",
+        "nordsyssel",
+        "sefstrom",
+        "doktor",
+        "edvard",
+    ]
+
+    ordered = []
+    if all_default:
+        for glacier in preordered:
+            if glacier in glaciers:
+                glaciers.remove(glacier)
+
+    for glacier in preordered:
+
+        if glacier in glaciers:
+            glaciers.remove(glacier)
+        elif all_default:
+            pass
+        else:
+            continue
+        ordered.append(glacier)
+
+    glaciers.sort()
+    return ordered + glaciers
+
+
 def measure_lengths(
     positions: gpd.GeoDataFrame,
     centerline: shapely.geometry.LineString,
@@ -250,7 +304,7 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
 
     front_positions = (
         front_positions.set_index("date", drop=False)
-        .resample("1M", label="right")
+        .resample("3M", label="right")
         .first()
         .dropna()
         .reset_index(drop=True)
@@ -260,7 +314,9 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
     checksum = projectfiles.get_checksum([front_positions, centerline, domain, coh_boundary])
     cache_filepath = CACHE_DIR / f"get_length_evolution/get_length_evolution-{glacier}-{checksum}.csv"
     if cache_filepath.is_file() and not force_redo:
-        return pd.read_csv(cache_filepath, index_col=[0, 1], parse_dates=True, date_format="%Y-%m-%d")
+        cached = pd.read_csv(cache_filepath, index_col=[0, 1], parse_dates=True, date_format="%Y-%m-%d")
+        # cached.index.names = ["kind", "date"]
+        return cached
 
     # Split the lower and upper coherence boundaries
     lower_coh_boundary: gpd.GeoDataFrame = coh_boundary.query("boundary_type == 'lower'")
@@ -340,10 +396,7 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
 
             new_idx_vals = all_dates[~pd.Index(all_dates).isin(idx)]
             lengths_raw["lower_coh"] = pd.concat(
-                [
-                    lengths_raw["front"][lengths_raw["front"]["date"].isin(new_idx_vals)],
-                    lengths_raw["lower_coh"]
-                ]
+                [lengths_raw["front"][lengths_raw["front"]["date"].isin(new_idx_vals)], lengths_raw["lower_coh"]]
             ).sort_values("date")
 
             # Interpolate the values in between
@@ -387,13 +440,12 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
         # if kind not in lengths_raw:
         #     continue
 
-        if True:
+        if False:
             vel_cols = ["upper", "lower", "std"]
 
-            if (kind_data["median"] == 0.).all():
+            if (kind_data["median"] == 0.0).all():
                 data.loc[kind, ["vel"] + [f"vel_{key}" for key in vel_cols]] = 0
                 continue
-            
 
             velocities = measure_velocity(lengths_raw[kind]).set_index("date_to")
             velocities.index.name = "date"
@@ -419,6 +471,8 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
     data[num_cols] /= 1000
 
     data["surge_kind"] = "top-down" if top_down else "bottom-up"
+
+    data.index.names = ["kind", "date"]
 
     cache_filepath.parent.mkdir(exist_ok=True, parents=True)
     data.to_csv(cache_filepath)
@@ -725,7 +779,7 @@ def surge_statistics(force_redo: bool = False):
     # print(top_down.loc[(slice(None), "lower_coh", slice(None))].index)
 
 
-def plot_length_evolution(glacier: str = "arnesen", show: bool = False):
+def plot_length_evolution(glacier: str = "arnesen", show: bool = False, force_redo: bool = False):
     try:
         name = gpd.read_file("GIS/shapes/glaciers.geojson").query(f"key == '{glacier}'").iloc[0]["name"]
     except IndexError as exception:
@@ -736,7 +790,7 @@ def plot_length_evolution(glacier: str = "arnesen", show: bool = False):
     #     "sefstrom": "Sefströmbreen",
     # }
 
-    data = get_length_evolution(glacier=glacier)
+    data = get_length_evolution(glacier=glacier, force_redo=force_redo)
 
     plt.fill_between(np.unique(data.index.get_level_values(1)), data.loc["front", "median"], color="#" + "c" * 4 + "ff")
     plt.fill_between(
@@ -916,23 +970,138 @@ def old_plot_length_evolution(glacier: str = "arnesen"):
     plt.show()
 
 
-def plot_multi_front_evolution(show: bool = True):
-    glaciers = [
-        ["arnesen", "osborne", "kval", "stone"],
-        ["eton", "bore", "morsnev", "penck"],
-        ["scheele", "vallakra", "delta", "natascha"],
-        ["nordsyssel", "sefstrom", "doktor", "edvard"],
-    ]
+def plot_multi_front_velocity(show: bool = True, force_redo: bool = False):
+    n_cols = 4
+    glaciers = [[]]
+    for glacier in order_surges([], all_default=True):
+        if len(glaciers[-1]) >= n_cols:
+            glaciers.append([])
+        glaciers[-1].append(glacier)
+
+    all_data = {key: get_length_evolution(key, force_redo=force_redo) for key in np.ravel(glaciers)}
+
+    all_params = {
+        "front": {
+            "color": "blue",
+            "zorder": 3,
+            "label": "Terminus",
+        },
+        "lower_coh": {
+            "color": "red",
+            "zorder": 2,
+            "label": "Lower coh.",
+        },
+        "upper_coh": {
+            "color": "green",
+            "zorder": 4,
+            "label": "Upper coh.",
+        },
+    }
+
+    fig = plt.figure(figsize=(8, 2 * len(glaciers)), dpi=100)
+    n_rows = len(glaciers)
+    for row_n, row in enumerate(glaciers):
+        for col_n, glacier in enumerate(row):
+            i = col_n + n_cols * row_n
+            plt.subplot(n_rows, n_cols, i + 1)
+            data = all_data[glacier]
+            try:
+                name = gpd.read_file("GIS/shapes/glaciers.geojson").query(f"key == '{glacier}'").iloc[0]["name"]
+            except IndexError as exception:
+                raise ValueError(f"Key '{glacier}' not in glaciers.geojson") from exception
+
+            xlim = (
+                data.index.get_level_values("date").min() - pd.Timedelta(days=120),
+                data.index.get_level_values("date").max() + pd.Timedelta(days=120)
+            )
+
+            plt.hlines(0, *xlim, color="black", linestyles="--", alpha=0.3)
+            for kind, kind_data in data.groupby(level="kind"):
+
+                params = all_params[kind]
+
+                kind_data = kind_data.droplevel("kind")
+
+
+                if kind == "upper_coh" and (kind_data["vel"].fillna(0).abs() < 0.01).all():
+                    continue
+
+                kind_data = kind_data[kind_data["exact"]]
+
+
+                plt.fill_between(kind_data.index, kind_data["vel_lower"], kind_data["vel_upper"], color=params["color"], zorder=params["zorder"], alpha=0.3)
+
+                plt.plot(kind_data.index, kind_data["vel"], color=params["color"], zorder=params["zorder"], label=params["label"])
+                plt.scatter(kind_data.index, kind_data["vel"], zorder=params["zorder"], color=params["color"], s=6)
+
+            # if row_n == 0 and col_n == 0:
+            #     plt.legend()
+
+            plt.text(0.5, 0.97, name, transform=plt.gca().transAxes, va="top", ha="center")
+            ymax = data["vel_upper"].max()
+            ymin = data["vel_lower"].min()
+            yrange = ymax - ymin
+
+            plt.ylim(ymin - yrange * 0.15, ymax + yrange * 0.15)
+
+            plt.xlim(xlim)
+            xticks = plt.gca().get_xticks()
+            import matplotlib.dates as mdates
+            from matplotlib.ticker import StrMethodFormatter
+
+            plt.xticks([int(xticks[1]), xticks[int(len(xticks) / 2)], xticks[-1]])
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+            plt.gca().yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+
+            
+            plt.text(
+                0.01,
+                0.99,
+                "abcdefghijklmnopqrstuvx"[i] + ")",
+                transform=plt.gca().transAxes,
+                fontsize=9,
+                ha="left",
+                va="top",
+            )
+
+    # for i, glacier in enumerate(glaciers):
+    #     plt.subplot(1, 4, i +1)
+    plt.tight_layout(w_pad=-0.5, rect=(0.02, 0.0, 1.0, 1.0))
+    plt.text(0.01, 0.5, "Advance/retreat rate (m/d)", rotation=90, ha="center", va="center", transform=fig.transFigure)
+
+    plt.savefig("figures/front_velocity.jpg", dpi=300)
+    if show:
+        plt.show()
+    plt.close()
+
+    
+
+
+def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
+    n_cols = 4
+
+    glaciers = [[]]
+    for glacier in order_surges([], all_default=True):
+        if len(glaciers[-1]) >= n_cols:
+            glaciers.append([])
+        glaciers[-1].append(glacier)
+
+    # glaciers = [
+    #     ["arnesen", "osborne", "kval", "stone"],
+    #     ["eton", "bore", "morsnev", "penck"],
+    #     ["scheele", "vallakra", "delta", "natascha"],
+    #     ["nordsyssel", "sefstrom", "doktor", "edvard"],
+    # ]
     fig = plt.figure(figsize=(8, 2 * len(glaciers)), dpi=100)
 
     n_rows = len(glaciers)
-    n_cols = max((len(col) for col in glaciers))
+    # n_cols = max((len(col) for col in glaciers))
 
     for row_n, row in enumerate(glaciers):
         for col_n, glacier in enumerate(row):
             i = col_n + n_cols * row_n
             plt.subplot(n_rows, n_cols, i + 1)
-            plot_length_evolution(glacier)
+            plot_length_evolution(glacier, force_redo=force_redo)
             plt.text(
                 0.01,
                 0.99,
