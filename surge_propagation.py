@@ -1076,7 +1076,42 @@ def plot_multi_front_velocity(show: bool = True, force_redo: bool = False):
         plt.show()
     plt.close()
 
+
+def get_npi_data(layer: str):
+
+    if "CryoClim" in layer:
+
+        
+        url = "https://next.api.npolar.no/dataset/89f430f8-862f-11e2-8036-005056ad0004/attachment/4494bb0d-8b90-480b-aed1-47f7955ce81b/_blob"
+        uri = "/vsizip/{" + f"/vsicurl/{url}" + "}" + f"/{layer}.shp"
+        
+    else:
+        url = "https://public.data.npolar.no/kartdata/NP_S100_SHP.zip"
+        uri = f"/vsizip/vsicurl/{url}/NP_S100_SHP/{layer}.shp"
+
+    cache_filepath = CACHE_DIR / (layer + ".gpkg")
+
+    if cache_filepath.is_file():
+        return gpd.read_file(cache_filepath, layer="outlines")
+
+    outlines = gpd.read_file(uri)
+    # Remove Bjørnøya
+    outlines = outlines[outlines["geometry"].centroid.y > 8.4e6]
+
+    # The coordinate systems are essentially interchangeable
+    # Converting did not work as one value seems invalid
+    outlines.crs = rasterio.CRS.from_epsg(32633)
+
+    outlines.to_file(cache_filepath, driver="GPKG", layer="outlines")
+    return outlines
     
+
+    
+def get_svalbard_outlines() -> gpd.GeoDataFrame:
+    return get_npi_data("S100_Land_f")
+
+def get_svalbard_glaciers() -> gpd.GeoDataFrame:
+    return get_npi_data("CryoClim_GAO_SJ_2001-2010")
 
 
 def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
@@ -1100,27 +1135,32 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
 
     fig = plt.figure(figsize=(10, 6))
 
+    # The shape of the subplot2grid layout
     gridshape = (3, 6)
     margins = {"left": 0.04, "bottom": 0.056, "right": 0.99, "top": 0.947, "wspace": 0.274, "hspace": 0.256}
-    grid_top_margin = 0.03
+    # The separator lines for different parts of the figure needs shifting a bit
+    grid_shift_top = 0.03
     grid_shift_right = 0.005
 
-    overview_bottom = 1 -  2 / gridshape[0] + grid_top_margin
-    overview_right = 2 / gridshape[1] - grid_shift_right
+    # The overview map for some reason has very weird bounds (it starts too much to the left and down)
+    # These are used at the very end to fix that.
+    overview_bottom = 1 -  2 / gridshape[0] + grid_shift_top
+    overview_right = 2 / gridshape[1] + grid_shift_right
+
+    # Plot the overview map
     overview_axis = plt.subplot2grid(gridshape, (0, 0), rowspan=2, colspan=2)
     overview_axis.set_axis_off()
     overview_axis.margins(0)
+    outlines = get_svalbard_outlines()
+    overview_plot_kwargs = {"ax": overview_axis, "edgecolor": "black", "linewidth": 0.05}
+    outlines.dissolve().plot(color="lightgray", **overview_plot_kwargs)
+    # glacier_outlines.plot(column="used")
     plt.text(0.01, 0.99, "a)", fontsize=8, va="top", transform=fig.transFigure)
-    outlines = gpd.read_file("/vsizip//home/erik/Projects/UiO/ADSvalbard/data/outlines/NP_S100_SHP.zip/NP_S100_SHP/S100_Land_f.shp")
-    # Remove Bjørnøya
-    outlines = outlines[outlines["geometry"].centroid.y > 8.4e6]
-    outlines.dissolve().plot(color="lightgray", ax=overview_axis)
-    height = 2 / gridshape[0] - grid_top_margin
-    fig.patches.append(plt.Rectangle((0, 1 - height), 2 / gridshape[1] + grid_shift_right, height, transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
-    # plt.show()
 
-    # return
+    # Add an outline rectangle to the overview map
+    fig.patches.append(plt.Rectangle((0, overview_bottom), overview_right, 1 - overview_bottom, transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
 
+    # These groups will each have associated glaciers plotted and a rectangle outline around them.
     groups = {
         "Progressing surge bulges": {
             "loc": (2, 0),
@@ -1144,43 +1184,45 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
         }
     }
 
-    overview_points = {"x": [], "y": [], "s": []}
-    i = 1
+    # Initialize lists for the label annotations that should go on the overview map.
+    overview_labels = {"x": [], "y": [], "s": []}
+    i = 1  # This counter assigns the letter. It should start at b) (i=1)
     for group in groups:
         start_loc = groups[group]["loc"]
         glaciers = groups[group]["glaciers"]
 
-        height = len(glaciers)
-        width = max(map(len, glaciers))
-
+        # Define the bounds of the rectangles to draw
         rect = {
             "start_x": start_loc[1] / gridshape[1],
-            "height": (height / gridshape[0]),
-            "width": (width / gridshape[1]),
+            "height": (len(glaciers) / gridshape[0]),
+            "width": (max(map(len, glaciers)) / gridshape[1]),
         }
         rect["start_y"] = (1 - start_loc[0] / gridshape[0]) - rect["height"]
-        rect["height"] = min(1, rect["start_y"] + rect["height"] + grid_top_margin) - rect["start_y"]
+        # Clamp the "end_y" to 1
+        rect["height"] = min(1, rect["start_y"] + rect["height"] + grid_shift_top) - rect["start_y"]
+        # Shift the whole rectangle grid a bit
         if rect["start_x"] > 0.:
             rect["start_x"] += grid_shift_right
         else:
             rect["width"] += grid_shift_right
 
         # Make sure the "end_x" never surpasses 1
-        rect["width"] = min(1., rect["start_x"] + rect["width"]) - rect["start_x"]  
+        rect["width"] = min(1., rect["start_x"] + rect["width"]) - rect["start_x"]
+        # The bounds are needed later for labelling. This stores the bounds info.
         groups[group]["rect"] = rect
 
+        # Add an outline rectangle.
         fig.patches.append(plt.Rectangle((rect["start_x"], rect["start_y"]), rect["width"], rect["height"], transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
 
+        # Add the title of the group
         plt.text(rect["start_x"] + rect["width"] / 2, rect["start_y"] + rect["height"] - 0.03, group, ha="center", transform=fig.transFigure) 
 
+        # Add each glacier
         for row_n, row in enumerate(glaciers):
             for col_n, glacier in enumerate(row):
-                # print((start_loc[0] + row_n, start_loc[1] + col_n))
                 glacier_point = glacier_points.query(f"key == '{glacier}'").iloc[0]
                 axis = plt.subplot2grid(gridshape, (start_loc[0] + row_n, start_loc[1] + col_n))
 
-                # axis.set_title(glacier)
-                # axis.plot([1,2])
                 plot_length_evolution(glacier, force_redo=force_redo)
                 letter = "abcdefghijklmnopqrstuvx"[i] + ")"
                 plt.text(
@@ -1192,22 +1234,29 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                     ha="left",
                     va="top",
                 )
-                overview_points["x"].append(glacier_point.geometry.x)
-                overview_points["y"].append(glacier_point.geometry.y)
-                overview_points["s"].append(letter)
+                # Again, these data are for showing on the overview map
+                overview_labels["x"].append(glacier_point.geometry.x)
+                overview_labels["y"].append(glacier_point.geometry.y)
+                overview_labels["s"].append(letter)
                 i += 1
+
+
+    glacier_outlines = get_svalbard_glaciers()
+    glacier_outlines["used"] = glacier_outlines.geometry.intersects(shapely.geometry.MultiPoint(np.transpose([overview_labels["x"], overview_labels["y"]])))
+
+    glacier_outlines.query("used == False").plot(color="lightblue",**overview_plot_kwargs)
+    glacier_outlines.query("used == True").plot(color="orange", **overview_plot_kwargs)
 
     # Annotate the locations of the glaciers with their labels. This is nontrivial as the labels would 
     # overlap without this package that makes sure they don't. The lines are stupid though so I'm making them myself.
     new_positions, _, texts, *_ = textalloc.allocate(
         overview_axis,
-        overview_points["x"],
-        overview_points["y"],
-        overview_points["s"],
-        x_scatter=overview_points["x"],
-        y_scatter=overview_points["y"],
+        overview_labels["x"],
+        overview_labels["y"],
+        overview_labels["s"],
+        x_scatter=overview_labels["x"],
+        y_scatter=overview_labels["y"],
         textsize=8,
-        # linecolor="black",
         draw_lines=False,
         min_distance=0.,
         margin=0.,
@@ -1218,7 +1267,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
     # Draw lines from each label to the location's exact position
     for i, point in enumerate(new_positions):
         # This is the uncut line from label to the exact location
-        line = shapely.geometry.LineString([[point[0], point[1]], [overview_points["x"][i], overview_points["y"][i]]])
+        line = shapely.geometry.LineString([[point[0], point[1]], [overview_labels["x"][i], overview_labels["y"][i]]])
 
         # We don't want the line within the bounding box of the label itself.
         bbox = texts[i].get_window_extent().transformed(overview_axis.transData.inverted())
@@ -1228,7 +1277,9 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
 
 
     plt.subplots_adjust(**margins)
-    overview_axis.set_position([0.01, overview_bottom + 0.01, overview_right, 1 - overview_bottom - 0.01]) 
+    # For some reason, this call is needed here and not above. Maybe from the subplots_adjust?
+    overview_axis.set_position([0.01, overview_bottom + 0.01, overview_right - 0.01, 1 - overview_bottom - 0.01]) 
+    # Add a y-axis label
     plt.text(0.01, list(groups.values())[0]["rect"]["height"] / 2, "Distance (km)", rotation=90, ha="center", va="center", transform=fig.transFigure, fontsize=8)
 
     plt.savefig("figures/surge_front_evolution.jpg", dpi=300)
