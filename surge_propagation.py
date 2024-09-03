@@ -14,6 +14,7 @@ import rasterio.warp
 import rasterio.transform
 import itertools
 import projectfiles
+import textalloc
 
 from main import CACHE_DIR
 
@@ -305,7 +306,7 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
     front_positions = (
         front_positions.set_index("date", drop=False)
         .resample("3M", label="right")
-        .first()
+        .last()
         .dropna()
         .reset_index(drop=True)
     )
@@ -850,11 +851,12 @@ def plot_length_evolution(glacier: str = "arnesen", show: bool = False, force_re
 
     plt.xlim(np.min(data.index.get_level_values(1)), np.max(data.index.get_level_values(1)))
 
-    plt.text(0.5, 0.97, name, transform=plt.gca().transAxes, va="top", ha="center")
+    plt.text(0.5, 0.97, name, transform=plt.gca().transAxes, va="top", ha="center", fontsize=9)
 
     xticks = plt.gca().get_xticks()
 
-    plt.xticks([int(xticks[1]), xticks[int(len(xticks) / 2)], xticks[-1]])
+    plt.xticks([int(xticks[1]), xticks[int(len(xticks) / 2)], xticks[-2]], fontsize=8)
+    plt.yticks(fontsize=8)
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
     plt.gca().yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
 
@@ -1079,6 +1081,7 @@ def plot_multi_front_velocity(show: bool = True, force_redo: bool = False):
 
 def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
     n_cols = 4
+    glacier_points = gpd.read_file("GIS/shapes/glaciers.geojson")
 
     glaciers = [[]]
     for glacier in order_surges([], all_default=True):
@@ -1092,10 +1095,173 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
     #     ["scheele", "vallakra", "delta", "natascha"],
     #     ["nordsyssel", "sefstrom", "doktor", "edvard"],
     # ]
-    fig = plt.figure(figsize=(8, 2 * len(glaciers)), dpi=100)
+    # version = "top_down"
+
+
+    fig = plt.figure(figsize=(10, 6))
+
+    gridshape = (3, 6)
+    margins = {"left": 0.04, "bottom": 0.056, "right": 0.99, "top": 0.947, "wspace": 0.274, "hspace": 0.256}
+    grid_top_margin = 0.03
+    grid_shift_right = 0.005
+
+    overview_bottom = 1 -  2 / gridshape[0] + grid_top_margin
+    overview_right = 2 / gridshape[1] - grid_shift_right
+    overview_axis = plt.subplot2grid(gridshape, (0, 0), rowspan=2, colspan=2)
+    overview_axis.set_axis_off()
+    overview_axis.margins(0)
+    plt.text(0.01, 0.99, "a)", fontsize=8, va="top", transform=fig.transFigure)
+    outlines = gpd.read_file("/vsizip//home/erik/Projects/UiO/ADSvalbard/data/outlines/NP_S100_SHP.zip/NP_S100_SHP/S100_Land_f.shp")
+    # Remove Bjørnøya
+    outlines = outlines[outlines["geometry"].centroid.y > 8.4e6]
+    outlines.dissolve().plot(color="lightgray", ax=overview_axis)
+    height = 2 / gridshape[0] - grid_top_margin
+    fig.patches.append(plt.Rectangle((0, 1 - height), 2 / gridshape[1] + grid_shift_right, height, transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
+    # plt.show()
+
+    # return
+
+    groups = {
+        "Progressing surge bulges": {
+            "loc": (2, 0),
+            "glaciers": [["doktor", "edvard"]],
+        },
+        "Top-down (bulge) initiated surges": {
+            "loc": (0, 2),
+            "glaciers": [
+                ["nordsyssel", "natascha"],
+                ["vallakra", "scheele"],
+                ["penck", "morsnev"],
+            ],
+        },
+        "Terminus initiated surges": {
+            "loc": (0, 4),
+            "glaciers": [
+                ["arnesen", "osborne"],
+                ["kval", "stone"],
+                ["eton", "bore"],
+            ],
+        }
+    }
+
+    overview_points = {"x": [], "y": [], "s": []}
+    i = 1
+    for group in groups:
+        start_loc = groups[group]["loc"]
+        glaciers = groups[group]["glaciers"]
+
+        height = len(glaciers)
+        width = max(map(len, glaciers))
+
+        rect = {
+            "start_x": start_loc[1] / gridshape[1],
+            "height": (height / gridshape[0]),
+            "width": (width / gridshape[1]),
+        }
+        rect["start_y"] = (1 - start_loc[0] / gridshape[0]) - rect["height"]
+        rect["height"] = min(1, rect["start_y"] + rect["height"] + grid_top_margin) - rect["start_y"]
+        if rect["start_x"] > 0.:
+            rect["start_x"] += grid_shift_right
+        else:
+            rect["width"] += grid_shift_right
+
+        # Make sure the "end_x" never surpasses 1
+        rect["width"] = min(1., rect["start_x"] + rect["width"]) - rect["start_x"]  
+        groups[group]["rect"] = rect
+
+        fig.patches.append(plt.Rectangle((rect["start_x"], rect["start_y"]), rect["width"], rect["height"], transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
+
+        plt.text(rect["start_x"] + rect["width"] / 2, rect["start_y"] + rect["height"] - 0.03, group, ha="center", transform=fig.transFigure) 
+
+        for row_n, row in enumerate(glaciers):
+            for col_n, glacier in enumerate(row):
+                # print((start_loc[0] + row_n, start_loc[1] + col_n))
+                glacier_point = glacier_points.query(f"key == '{glacier}'").iloc[0]
+                axis = plt.subplot2grid(gridshape, (start_loc[0] + row_n, start_loc[1] + col_n))
+
+                # axis.set_title(glacier)
+                # axis.plot([1,2])
+                plot_length_evolution(glacier, force_redo=force_redo)
+                letter = "abcdefghijklmnopqrstuvx"[i] + ")"
+                plt.text(
+                    0.01,
+                    0.99,
+                    letter,
+                    transform=axis.transAxes,
+                    fontsize=9,
+                    ha="left",
+                    va="top",
+                )
+                overview_points["x"].append(glacier_point.geometry.x)
+                overview_points["y"].append(glacier_point.geometry.y)
+                overview_points["s"].append(letter)
+                i += 1
+
+    # Annotate the locations of the glaciers with their labels. This is nontrivial as the labels would 
+    # overlap without this package that makes sure they don't. The lines are stupid though so I'm making them myself.
+    new_positions, _, texts, *_ = textalloc.allocate(
+        overview_axis,
+        overview_points["x"],
+        overview_points["y"],
+        overview_points["s"],
+        x_scatter=overview_points["x"],
+        y_scatter=overview_points["y"],
+        textsize=8,
+        # linecolor="black",
+        draw_lines=False,
+        min_distance=0.,
+        margin=0.,
+        ha="center",
+        va="center"
+    )
+
+    # Draw lines from each label to the location's exact position
+    for i, point in enumerate(new_positions):
+        # This is the uncut line from label to the exact location
+        line = shapely.geometry.LineString([[point[0], point[1]], [overview_points["x"][i], overview_points["y"][i]]])
+
+        # We don't want the line within the bounding box of the label itself.
+        bbox = texts[i].get_window_extent().transformed(overview_axis.transData.inverted())
+        # Extract and then plot the part of the line that's outside the bounding box.
+        line_diff = line.difference(shapely.geometry.box(*bbox.extents))
+        overview_axis.plot(*line_diff.xy, color="gray", linewidth=0.5)
+
+
+    plt.subplots_adjust(**margins)
+    overview_axis.set_position([0.01, overview_bottom + 0.01, overview_right, 1 - overview_bottom - 0.01]) 
+    plt.text(0.01, list(groups.values())[0]["rect"]["height"] / 2, "Distance (km)", rotation=90, ha="center", va="center", transform=fig.transFigure, fontsize=8)
+
+    plt.savefig("figures/surge_front_evolution.jpg", dpi=300)
+
+    if show:
+        plt.show()
+    return
+        
+    glaciers_bottom_up = [
+        ["arnesen", "osborne"],
+        ["kval", "stone"],
+        ["eton", "bore"],
+    ]
+    glaciers_top_down = [
+        ["nordsyssel", "natascha"],
+        ["vallakra", "scheele"],
+        ["penck", "morsnev"],
+    ]
+
+    start_i = 0
+    if version == "bottom_up":
+        glaciers = glaciers_bottom_up
+        figsize = (4, 2 * len(glaciers))
+    elif version == "top_down":
+        start_i = sum(map(len, glaciers_bottom_up))
+        glaciers = glaciers_top_down
+        figsize = (4, 2 * len(glaciers))
+    else:
+        figsize=(4, 2 * len(glaciers))        
+    fig = plt.figure(figsize=figsize, dpi=100)
 
     n_rows = len(glaciers)
-    # n_cols = max((len(col) for col in glaciers))
+    n_cols = max((len(col) for col in glaciers))
 
     for row_n, row in enumerate(glaciers):
         for col_n, glacier in enumerate(row):
@@ -1105,7 +1271,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
             plt.text(
                 0.01,
                 0.99,
-                "abcdefghijklmnopqrstuvx"[i] + ")",
+                "abcdefghijklmnopqrstuvx"[start_i + i] + ")",
                 transform=plt.gca().transAxes,
                 fontsize=9,
                 ha="left",
@@ -1117,7 +1283,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
     plt.tight_layout(w_pad=-0.5, rect=(0.02, 0.0, 1.0, 1.0))
     plt.text(0.01, 0.5, "Distance (km)", rotation=90, ha="center", va="center", transform=fig.transFigure)
 
-    plt.savefig("figures/front_change.jpg", dpi=300)
+    plt.savefig(f"figures/front_change_{version}.jpg", dpi=300)
     if show:
         plt.show()
     plt.close()

@@ -12,3 +12,4 @@ projectfiles
 rasterio
 gdal
 glacier_lengths
+textalloc
