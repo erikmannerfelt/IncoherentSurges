@@ -7,3 +7,7 @@ __pycache__/
 *.qgs~
 figures/
 eton/
+tables/
+/S1*INT*/
+/temp*
+*.qmd

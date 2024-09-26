@@ -19,6 +19,7 @@
 { "type": "Feature", "properties": { "key": "arnesen", "name": "Arnesenbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 575488.94436006504111, 8642821.841824421659112 ] } },
 { "type": "Feature", "properties": { "key": "sefstrom", "name": "Sefströmbreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 480207.076980973768514, 8740762.589954162016511 ] } },
 { "type": "Feature", "properties": { "key": "bore", "name": "Borebreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 475239.587195314699784, 8707916.65589065477252 ] } },
-{ "type": "Feature", "properties": { "key": "osborne", "name": "Osbornebreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 459811.710264854656998, 8729442.444961842149496 ] } }
+{ "type": "Feature", "properties": { "key": "osborne", "name": "Osbornebreen", "enable": 1 }, "geometry": { "type": "Point", "coordinates": [ 459811.710264854656998, 8729442.444961842149496 ] } },
+{ "type": "Feature", "properties": { "key": "kongsvegen", "name": "Kongsvegen", "enable": 0 }, "geometry": { "type": "Point", "coordinates": [ 457581.577667598379776, 8747998.363780209794641 ] } }
 ]
 }
