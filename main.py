@@ -359,8 +359,8 @@ def main():
 
     if to_process.shape[0] == 0:
         print("All scenes exist")
-        raise NotImplementedError("There may still be un-downloaded scenes. A final download pass is not implemented.")
-        return
+        # raise NotImplementedError("There may still be un-downloaded scenes. A final download pass is not implemented.")
+        # return
 
     download_baselines(to_process)
 
