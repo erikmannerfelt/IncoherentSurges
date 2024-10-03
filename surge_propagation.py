@@ -861,6 +861,12 @@ def surge_statistics(force_redo: bool = False):
                 else:
                     way_pre_surge = pre_surge
 
+
+                # Keep only the last three points to get the most "recent" trend.
+                dates_to_keep = np.unique(way_pre_surge.index.get_level_values("date"))[-3:]
+                if dates_to_keep.shape[0] > 1:
+                    way_pre_surge = way_pre_surge.loc[(slice(None), dates_to_keep), :]
+
                 stats.loc[key, "pre_surge_bulge_speed"] = pre_surge.loc["lower_coh", "vel"].mean()
                 
 
