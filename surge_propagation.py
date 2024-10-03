@@ -1334,10 +1334,39 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
 
     stats = surge_statistics()
 
-    fig = plt.figure(figsize=(10, 6))
+    # These groups will each have associated glaciers plotted and a rectangle outline around them.
+    groups = {
+        "Progressing surge bulges": {
+            "loc": (2, 0),
+            "glaciers": [["doktor", "edvard"]],
+        },
+        "Top-down (bulge) initiated surges": {
+            "loc": (0, 2),
+            "glaciers": [
+                ["sefstrom", "natascha", "delta"],
+                ["nordsyssel", "vallakra", "scheele"],
+                ["liestol", "penck", "morsnev"],
+            ],
+        },
+        "Terminus initiated surges": {
+            "loc": (0, 5),
+            "glaciers": [
+                ["arnesen", "osborne"],
+                ["kval", "stone"],
+                ["eton", "bore"],
+            ],
+        }
+    }
+    per_group_n_cols = [max(len(row) for row in group["glaciers"]) for group in groups.values()]
+    n_cols = sum(per_group_n_cols)
+
+    groups[list(groups.keys())[1]]["loc"] = (0, per_group_n_cols[0])
+    groups[list(groups.keys())[2]]["loc"] = (0, sum(per_group_n_cols[:2]))
+
+    fig = plt.figure(figsize=(n_cols * 10 / 6, 6))
 
     # The shape of the subplot2grid layout
-    gridshape = (3, 6)
+    gridshape = (3, n_cols)
     margins = {"left": 0.04, "bottom": 0.056, "right": 0.99, "top": 0.947, "wspace": 0.274, "hspace": 0.256}
     # The separator lines for different parts of the figure needs shifting a bit
     grid_shift_top = 0.03
@@ -1360,30 +1389,6 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
 
     # Add an outline rectangle to the overview map
     fig.patches.append(plt.Rectangle((0, overview_bottom), overview_right, 1 - overview_bottom, transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
-
-    # These groups will each have associated glaciers plotted and a rectangle outline around them.
-    groups = {
-        "Progressing surge bulges": {
-            "loc": (2, 0),
-            "glaciers": [["doktor", "edvard"]],
-        },
-        "Top-down (bulge) initiated surges": {
-            "loc": (0, 2),
-            "glaciers": [
-                ["nordsyssel", "natascha"],
-                ["vallakra", "scheele"],
-                ["penck", "morsnev"],
-            ],
-        },
-        "Terminus initiated surges": {
-            "loc": (0, 4),
-            "glaciers": [
-                ["arnesen", "osborne"],
-                ["kval", "stone"],
-                ["eton", "bore"],
-            ],
-        }
-    }
 
     # Initialize lists for the label annotations that should go on the overview map.
     overview_labels = {"x": [], "y": [], "s": []}
@@ -1437,23 +1442,19 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                     closest_upper = data.loc["upper_coh"].sort_values("date_diff_to_start").iloc[0]
                     lims["surge_start_coh"] = (closest_upper["median"], closest_lower["median"])
 
-                    # closest_upper = 
-
-                    # closest_point = data.loc[(slice(None), surge_start)]
-
                     plt.vlines(surge_start, ylim[0], closest_lower["median"], linestyles="--", color="darkgray", linewidth=1)
                     surge_start = matplotlib.dates.date2num(surge_start)
                 else:
                     surge_start = xlim[0]
                 if not pd.isna(surge_termination := stats.loc[glacier, "surge_termination"]):
-                    plt.vlines(surge_termination, *ylim, linestyles=":", color="darkgray", linewidth=1)
-                    # surge_end = surge_termination
                     data["date_diff_to_end"] = np.abs((data.index.get_level_values("date") - surge_termination).total_seconds().values) / (3600 * 24)
 
                     closest_lower = data.loc["lower_coh"].sort_values("date_diff_to_end").iloc[0]
                     closest_upper = data.loc["upper_coh"].sort_values("date_diff_to_end").iloc[0]
 
                     lims["surge_termination_coh"] = (closest_upper["median"], closest_lower["median"])
+
+                    plt.vlines(surge_termination, ylim[0], closest_lower["median"], linestyles=":", color="darkgray", linewidth=1)
                     surge_termination = matplotlib.dates.date2num(surge_termination)
                 else:
                     surge_termination = xlim[1]
@@ -1468,7 +1469,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                     y_line = np.mean(surge_ylim)
                     x_mid = np.mean([surge_start, surge_termination])
 
-                    text = plt.annotate("Surge", (x_mid, y_line), ha="center", va="bottom", fontsize=9, color="white", path_effects=[matplotlib.patheffects.withStroke(linewidth=1, foreground="black")])
+                    text = plt.annotate("Surge", (x_mid, y_line), ha="center", va="bottom", fontsize=9, color="white", path_effects=[matplotlib.patheffects.withStroke(linewidth=0.5, foreground="black")])
 
                     bbox = matplotlib.transforms.TransformedBbox(text.get_window_extent(), plt.gca().transData.inverted())
 
@@ -1545,59 +1546,8 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
 
     if show:
         plt.show()
-    return
-        
-    glaciers_bottom_up = [
-        ["arnesen", "osborne"],
-        ["kval", "stone"],
-        ["eton", "bore"],
-    ]
-    glaciers_top_down = [
-        ["nordsyssel", "natascha"],
-        ["vallakra", "scheele"],
-        ["penck", "morsnev"],
-    ]
 
-    start_i = 0
-    if version == "bottom_up":
-        glaciers = glaciers_bottom_up
-        figsize = (4, 2 * len(glaciers))
-    elif version == "top_down":
-        start_i = sum(map(len, glaciers_bottom_up))
-        glaciers = glaciers_top_down
-        figsize = (4, 2 * len(glaciers))
-    else:
-        figsize=(4, 2 * len(glaciers))        
-    fig = plt.figure(figsize=figsize, dpi=100)
-
-    n_rows = len(glaciers)
-    n_cols = max((len(col) for col in glaciers))
-
-    for row_n, row in enumerate(glaciers):
-        for col_n, glacier in enumerate(row):
-            i = col_n + n_cols * row_n
-            plt.subplot(n_rows, n_cols, i + 1)
-            plot_length_evolution(glacier, force_redo=force_redo)
-            plt.text(
-                0.01,
-                0.99,
-                "abcdefghijklmnopqrstuvx"[start_i + i] + ")",
-                transform=plt.gca().transAxes,
-                fontsize=9,
-                ha="left",
-                va="top",
-            )
-
-    # for i, glacier in enumerate(glaciers):
-    #     plt.subplot(1, 4, i +1)
-    plt.tight_layout(w_pad=-0.5, rect=(0.02, 0.0, 1.0, 1.0))
-    plt.text(0.01, 0.5, "Distance (km)", rotation=90, ha="center", va="center", transform=fig.transFigure)
-
-    plt.savefig(f"figures/front_change_{version}.jpg", dpi=300)
-    if show:
-        plt.show()
     plt.close()
-
 
 def main():
     plot_multi_front_evolution()
