@@ -479,6 +479,18 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
     data["surge_kind"] = "top-down" if top_down else "bottom-up"
 
     data.index.names = ["kind", "date"]
+    # data["coh_zone_length"] = data.loc["lower_coh", "median"] - data.loc["upper_coh", "median"]
+    coh_zone_length = data.loc["lower_coh", "median"] - data.loc["upper_coh", "median"]
+    coh_zone_frac = coh_zone_length / data.loc["front", "median"]
+
+    # Really messy way to reindex to include the "kind", and repeat the values over that axis.
+    for key, new_data in [("coh_zone_frac", coh_zone_frac), ("coh_zone_length", coh_zone_length)]:
+        data[key] = (
+            pd.concat({key: new_data for key in np.unique(data.index.get_level_values("kind"))}, names=["kind"])
+            .reorder_levels(data.index.names)
+            .reindex(data.index)
+        )
+
 
     cache_filepath.parent.mkdir(exist_ok=True, parents=True)
     data.to_csv(cache_filepath)
@@ -675,95 +687,86 @@ def record_information(new_info: dict[str, object] | None = None) -> dict[str, o
     return info
     
 
-def surge_statistics(force_redo: bool = False):
-    all_data = get_all_length_evolution(force_redo=force_redo)
+def classify_surge_stages(key: str, data: pd.DataFrame, bottom_up_surge_frac_threshold: float):
+    data = data.droplevel("key")
 
-    idx = (slice(None), "lower_coh", slice(None))
+    is_top_down = (data["surge_kind"] == "top-down").iloc[0]
 
-    def get_col(kind: str, col: str = "median", data: pd.DataFrame = all_data) -> pd.Series:
-        return data.loc[(slice(None), kind, slice(None)), col].droplevel(1)
+    if is_top_down:
+        # stats = top_down_stats
+        reached_front = (data.loc["lower_coh", "median"] >= (data.loc["front", "median"] * 0.99))[data.loc["lower_coh", "exact"]]
 
-    coh_zone_length = get_col("lower_coh") - get_col("upper_coh")
-    coh_zone_frac = coh_zone_length / get_col("front")
+        # Super annoying bug that I can't figure out
+        if key == "morsnev":
+            reached_front.loc["2016-08-21":"2018-01-01"] = True
 
-    # Really messy way to reindex to include the "kind", and repeat the values over that axis.
-    for key, data in [("coh_zone_frac", coh_zone_frac), ("coh_zone_length", coh_zone_length)]:
-        all_data[key] = (
-            pd.concat({key: data for key in np.unique(all_data.index.get_level_values("kind"))}, names=["kind"])
-            .reorder_levels(all_data.index.names)
-            .reindex(all_data.index)
-        )
-    # print(all_data.loc[(slice(None), "front"
+        stage = reached_front.astype(int).diff().fillna(0).abs().cumsum()
 
-    top_down = all_data[all_data["surge_kind"] == "top-down"]
-    bottom_up = all_data[all_data["surge_kind"] == "bottom-up"]
+        # If the surge has already reached the front by the first date, mark it as already surging.
+        if reached_front.iloc[0]:
+            stage += 1
 
+        # If stagnation is caught, set the last surge point as part of the stagnation.
+        # It makes more sense when seen in the figure.
+        if (stage == 2).any():
+            stage.loc[stage[stage == 1].index[-1]] = 2
+    else:
+        # stats = bottom_up_stats
+
+        # coh_zone_width = data.loc["front", "median"] - data.loc["upper_coh", "median"]
+        if key == "eton":
+            surge_start_date = pd.Timestamp("2023-11-11")
+        else:
+            surge_start_date = (
+                data.loc["front", "coh_zone_frac"]
+                .pipe(lambda f: f[f > bottom_up_surge_frac_threshold])
+                .sort_index()
+                .index[0]
+            )
+
+            # coh_is_surge = coh_zone_width > bottom_up_surge_length_threshold
+            # surge_start_date = coh_is_surge[coh_is_surge].index[0]
+
+        # bottom_up_stats.loc[key, "surge_start"] = surge_start_date
+
+        stage = pd.Series(np.zeros(data.loc["lower_coh"].shape[0]), data.loc["lower_coh"].index)
+
+        stage.loc[slice(surge_start_date, None)] += 1
+
+        surge_stop = data.loc["lower_coh", "median"] < (data.loc["front", "median"] * 0.99)
+        if surge_stop.any():
+            stage.loc[slice(surge_stop[~surge_stop].index[-1], None)] += 1
+
+    if stage.max() > 2:
+        # print(reached_front)
+        print(stage)
+        raise NotImplementedError(f"{key} had more stages than expected")
+
+
+    indexes = {
+        "pre_surge": [*stage[stage == 0].index, *stage[stage == 1].index[:1]],
+        "surge": stage[stage == 1].index,
+        "post_surge": stage[stage == 2].index,
+    }
+    # pre_surge_index = 
+    # surge_index = stage[stage == 1].index)
+    # post_surge_index = stage[stage == 2].index
+
+    return {key: data.loc[(slice(None), idx), :].sort_index() for key, idx in indexes.items()}
+    # for key, idx in [("pre_surge", pre_surge_index
+
+    # pre_surge = data.loc[(slice(None), [*stage[stage == 0].index, *stage[stage == 1].index[:1]]), :].sort_index()
+
+    # surge = data.loc[(slice(None), stage[stage == 1].index), :].sort_index()
+    # post_surge = data.loc[(slice(None), stage[stage == 2].index), :].sort_index()
+
+
+def plot_advance_rate_vs_coh_frac(bins, dig, binned_vel):
     plt.figure(figsize=(8, 5))
 
-    length_data = (get_col("front", "coh_zone_length", bottom_up)).values
-    vel_data = (get_col("front", "vel", bottom_up)).values
-    valid_mask = np.isfinite(vel_data)
-    frac_data = length_data[valid_mask]
-    vel_data = vel_data[valid_mask]
-
-    # binsize = 10
-    # bins = np.arange(0, 100 + binsize, binsize)
-    bins = np.linspace(0, length_data.max() + 1, num=11)
     binsize = np.mean(np.diff(bins))
-    dig = np.digitize(frac_data, bins)
+
     xmid = (bins[1:] - np.diff(bins) / 2)[np.unique(dig) - 1]
-    binned_vel = [vel_data[dig == i] for i in np.unique(dig)]
-
-    advancing_mask = np.array([np.median(vals) for vals in binned_vel]) > 0.15
-    # bottom_up_surge_threshold = bins[1:][advancing_mask][0] / 100
-    # bottom_up_surge_threshold = xmid[advancing_mask][0] / 100
-    bottom_up_surge_length_threshold = bins[:-1][advancing_mask][0]
-
-    # print(f"Bottom-up surges start at {bottom_up_surge_length_threshold:.2f}km of low-coh progression")
-
-    plt.hlines(0, bins[0], bins[-1], color="black", linestyles=":", alpha=0.4)
-    box_width = binsize / 2
-    plt.boxplot(
-        binned_vel,
-        positions=xmid,
-        widths=box_width,
-        manage_ticks=False,
-        medianprops={"color": "blue"},
-        **{f"{k}props": {"color": "royalblue"} for k in ["box", "flier", "whisker", "cap"]},
-    )
-
-    for i, vals in enumerate(binned_vel):
-        med = np.median(vals)
-        plt.text(xmid[i], med, f"{med:.1f} m/d", ha="center", va="center", fontsize=6)
-
-    plt.xlabel("Low-coherence zone length (km)")
-    plt.ylabel("Advance/retreat rate (m/d)")
-    plt.tight_layout()
-    plt.xlim(xmid[0] - box_width, xmid[-1] + box_width)
-    # plt.xticks(xmid, labels=[f"{bins[i]}-{min(bins[i + 1], 100)}" for i in range(len(xmid))])
-    plt.savefig("figures/bottom_up_vel_vs_coh_length.jpg", dpi=300)
-    plt.close()
-
-    plt.figure(figsize=(8, 5))
-
-    frac_data = (get_col("front", "coh_zone_frac", bottom_up.drop("eton")) * 100).values
-    vel_data = (get_col("front", "vel", bottom_up.drop("eton"))).values
-    valid_mask = np.isfinite(vel_data)
-    frac_data = frac_data[valid_mask]
-    vel_data = vel_data[valid_mask]
-
-    binsize = 10
-    bins = np.arange(0, 100 + binsize, binsize)
-    dig = np.digitize(frac_data, bins)
-    xmid = (bins[1:] - np.diff(bins) / 2)[np.unique(dig) - 1]
-    binned_vel = [vel_data[dig == i] for i in np.unique(dig)]
-
-    advancing_mask = np.array([np.median(vals) for vals in binned_vel]) > 0.1
-    bottom_up_surge_frac_threshold = bins[1:][advancing_mask][0] / 100
-    # bottom_up_surge_threshold = xmid[advancing_mask][0] / 100
-
-    # print(f"Bottom-up surges start at {bottom_up_surge_frac_threshold * 100}% low-coh coverage")
-
     plt.hlines(0, bins[0], bins[-1], color="black", linestyles=":", alpha=0.4)
     box_width = binsize / 2
     plt.boxplot(binned_vel, positions=xmid, widths=5, manage_ticks=False)
@@ -775,87 +778,76 @@ def surge_statistics(force_redo: bool = False):
     plt.xticks(xmid, labels=[f"{bins[i]}-{min(bins[i + 1], 100)}" for i in range(len(xmid))])
     plt.savefig("figures/bottom_up_vel_vs_coh_frac.jpg", dpi=300)
 
+
+def calc_bottom_up_surge_threshold(data: pd.DataFrame, binsize: int = 10, vel_threshold: float = 0.1, plot: bool = False) -> float:
+    """Calculate the low-coherence expanse threshold after which to call a bottom-up propagation a surge.
+
+    Parameters
+    ----------
+    data
+        Front data for bottom-up surges
+    binsize
+        The binsize in % to use for classification and plotting.
+    vel_threshold
+        The threshold (m/d) to use in order to consider a glacier advancing.
+    plot
+        Plot the data classification in a figure.
+
+    Returns
+    -------
+    The fraction after which to call a bottom-up propagation a surge.
+    """
+    def get_col(kind: str, col: str = "median", data: pd.DataFrame = data) -> pd.Series:
+        return data.loc[(slice(None), kind, slice(None)), col].droplevel(1)
+
+    frac_data = (get_col("front", "coh_zone_frac", data.drop("eton")) * 100).values
+    vel_data = (get_col("front", "vel", data.drop("eton"))).values
+    valid_mask = np.isfinite(vel_data)
+    frac_data = frac_data[valid_mask]
+    vel_data = vel_data[valid_mask]
+
+    bins = np.arange(0, 100 + binsize, binsize)
+    dig = np.digitize(frac_data, bins)
+    binned_vel = [vel_data[dig == i] for i in np.unique(dig)]
+
+    advancing_mask = np.array([np.median(vals) for vals in binned_vel]) > vel_threshold
+    bottom_up_surge_frac_threshold = bins[1:][advancing_mask][0] / 100
+    # bottom_up_surge_threshold = xmid[advancing_mask][0] / 100
+
+    if plot:
+        plot_advance_rate_vs_coh_frac(bins=bins, dig=dig, binned_vel=binned_vel)
+
+    return bottom_up_surge_frac_threshold
+
+    
+    
+def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
+    """Classify and render surge statistics tables.
+
+    All glacier data are read, classified (pre-surge/surge/post-surge) and statistics are extracted.
+
+    Returns
+    -------
+    A dataframe of statistics for each glacier.
+
+    """
+    all_data = get_all_length_evolution(force_redo=force_redo)
+    bottom_up = all_data[all_data["surge_kind"] == "bottom-up"]
+
+    bottom_up_surge_frac_threshold = calc_bottom_up_surge_threshold(data=bottom_up, plot=True)
+    print(f"Bottom-up surges start at {bottom_up_surge_frac_threshold * 100}% low-coh coverage")
+
     top_down_stats = pd.DataFrame()
     bottom_up_stats = pd.DataFrame()
     for key, data in all_data.groupby(level=0):
-        # print(key)
-        # if key in ["delta"]:
-        #     print(f"DEBUG: skipping {key}")
-        #     continue
-        top_down = (data["surge_kind"] == "top-down").iloc[0]
-        data = data.droplevel(0)
+        is_top_down = (data["surge_kind"] == "top-down").iloc[0]
+        pre_surge, surge, post_surge = classify_surge_stages(key=key, data=data, bottom_up_surge_frac_threshold=bottom_up_surge_frac_threshold).values()
 
-        if top_down:
-            stats = top_down_stats
-            reached_front = (data.loc["lower_coh", "median"] >= (data.loc["front", "median"] * 0.99))[data.loc["lower_coh", "exact"]]
-
-            # Super annoying bug that I can't figure out
-            if key == "morsnev":
-                reached_front.loc["2016-08-21":"2018-01-01"] = True
-
-            stage = reached_front.astype(int).diff().fillna(0).abs().cumsum()
-
-            # If the surge has already reached the front by the first date, mark it as already surging.
-            if reached_front.iloc[0]:
-                stage += 1
-
-
-            if (stage == 2).any():
-
-                stage.loc[stage[stage == 1].index[-1]] = 2
-                # print((data.loc["lower_coh", "median"] / (data.loc["front", "median"]))[data.loc["lower_coh", "exact"]])
-
-                # print(key)
-                # print(stage)
-                # print(reached_front)
-                # print("\n\n")
-
-            # if reached_front.any():
-            #     stats.loc[key, "reaching_front"] = reached_front[reached_front].index[0]
-        else:
-            stats = bottom_up_stats
-
-            coh_zone_width = data.loc["front", "median"] - data.loc["upper_coh", "median"]
-            if key == "eton":
-                surge_start_date = pd.Timestamp("2023-11-11")
-            else:
-                surge_start_date = (
-                    data.loc["front", "coh_zone_frac"]
-                    .pipe(lambda f: f[f > bottom_up_surge_frac_threshold])
-                    .sort_index()
-                    .index[0]
-                )
-
-                # coh_is_surge = coh_zone_width > bottom_up_surge_length_threshold
-                # surge_start_date = coh_is_surge[coh_is_surge].index[0]
-
-            bottom_up_stats.loc[key, "surge_start"] = surge_start_date
-
-            stage = pd.Series(np.zeros(data.loc["lower_coh"].shape[0]), data.loc["lower_coh"].index)
-
-            stage.loc[slice(surge_start_date, None)] += 1
-
-            surge_stop = data.loc["lower_coh", "median"] < (data.loc["front", "median"] * 0.99)
-            if surge_stop.any():
-                stage.loc[slice(surge_stop[~surge_stop].index[-1], None)] += 1
-
-        if stage.max() > 2:
-            # print(reached_front)
-            print(stage)
-            raise NotImplementedError(f"{key} had more stages than expected")
-
-        pre_surge = data.loc[(slice(None), [*stage[stage == 0].index, *stage[stage == 1].index[:1]]), :].sort_index()
-
-        surge = data.loc[(slice(None), stage[stage == 1].index), :].sort_index()
-        post_surge = data.loc[(slice(None), stage[stage == 2].index), :].sort_index()
+        stats = top_down_stats if is_top_down else bottom_up_stats
 
         if pre_surge.shape[0] > 0:
-            if top_down:
+            if is_top_down:
                 if surge.shape[0] > 0:
-                    # way_pre_surge = data.sort_index(ascending=True).loc[
-                        # (slice(None), slice(pre_surge.index.get_level_values("date").max() - pd.Timedelta(days=365), None)),
-                        # :,
-                    # ]
                     way_pre_date = pre_surge.index.get_level_values("date").max() - pd.Timedelta(days=365)
                     way_pre_surge = pre_surge.loc[(slice(None), slice(None, way_pre_date)), :]
                 else:
@@ -867,9 +859,8 @@ def surge_statistics(force_redo: bool = False):
                 if dates_to_keep.shape[0] > 1:
                     way_pre_surge = way_pre_surge.loc[(slice(None), dates_to_keep), :]
 
-                stats.loc[key, "pre_surge_bulge_speed"] = pre_surge.loc["lower_coh", "vel"].mean()
+                stats.loc[key, "instability_rate"] = pre_surge.loc["lower_coh", "vel"].mean()
                 
-
                 if way_pre_surge.loc["lower_coh"].shape[0] > 1:
                     times = way_pre_surge.loc["lower_coh"].index.values.astype(float)
                     model = np.polyfit(
@@ -878,17 +869,17 @@ def surge_statistics(force_redo: bool = False):
                         deg=1,
                     )
                     intercept_time = pd.Timestamp(-model[1] / model[0])
-
                     stats.loc[key, "predicted_advance_date"] = intercept_time
 
         if surge.shape[0] > 0:
-            if top_down:
+            stats.loc[key, "surge_start"] = surge.loc["lower_coh"].index[0]
+            if is_top_down:
                 stats.loc[key, "reaching_front"] = surge.loc["lower_coh"].index[0]
             first_year_surge = surge.loc[
                 (slice(None), slice(None, surge.index.get_level_values(1).min() + pd.Timedelta(days=365 * 1))), :
             ]
-            if not top_down:
-                stats.loc[key, "surge_propagation_rate"] = -surge.loc["upper_coh", "vel"].mean()
+            if not is_top_down:
+                stats.loc[key, "instability_rate"] = -surge.loc["upper_coh", "vel"].mean()
             stats.loc[key, "surge_advance_rate"] = first_year_surge.loc["front", "vel"].mean()
 
         if post_surge.shape[0] > 0:
@@ -900,26 +891,16 @@ def surge_statistics(force_redo: bool = False):
 
     top_down_stats = top_down_stats.sort_values("reaching_front")
     bottom_up_stats = bottom_up_stats.sort_values("surge_start")
+
     # print(stats.rename(columns=nice_names))
     tables_dir = Path("tables")
     tables_dir.mkdir(exist_ok=True)
     _tex = render_stats_table(top_down_stats, tables_dir / "top_down_surge_stats.tex", 5)
     _tex2 = render_stats_table(bottom_up_stats, tables_dir / "bottom_up_surge_stats.tex")
 
-    # print("Top-down")
-    # print(top_down_stats.select_dtypes(np.number).describe())
-
-    # print(top_down_stats["pre_surge_bulge_speed"].corr(top_down_stats["surge_advance_rate"]))
-
-    # print("Bottom-up")
-    # print(bottom_up_stats.select_dtypes(np.number).describe())
-
-    # print("Combined")
-    # print(pd.concat([top_down_stats, bottom_up_stats], join="inner").select_dtypes(np.number).describe())
-
     top_down_stats["surge_kind"] = "TD"
     bottom_up_stats["surge_kind"] = "BU"
-    combined_stats = pd.concat([top_down_stats.rename(columns={"reaching_front": "surge_start", "pre_surge_bulge_speed": "instability_rate"}), bottom_up_stats.rename(columns={"surge_propagation_rate": "instability_rate"})])
+    combined_stats = pd.concat([top_down_stats, bottom_up_stats])
     combined_stats.insert(0, "surge_kind", combined_stats.pop("surge_kind"))
 
     out_info = {
@@ -929,8 +910,8 @@ def surge_statistics(force_redo: bool = False):
             "instability": {},
             "stagnation": {},
             "other": {
-                "top_down_bulge_vs_advance_rate_corr": top_down_stats["pre_surge_bulge_speed"].corr(top_down_stats["surge_advance_rate"]),
-                "bottom_up_propagation_vs_advance_rate_corr": bottom_up_stats["surge_propagation_rate"].corr(bottom_up_stats["surge_advance_rate"]),
+                "top_down_bulge_vs_advance_rate_corr": top_down_stats["instability_rate"].corr(top_down_stats["surge_advance_rate"]),
+                "bottom_up_propagation_vs_advance_rate_corr": bottom_up_stats["instability_rate"].corr(bottom_up_stats["surge_advance_rate"]),
             },
         },
     }
@@ -940,14 +921,9 @@ def surge_statistics(force_redo: bool = False):
 
         out_info["advance_rates"]["terminus"][f"{key}"] = data["surge_advance_rate"].median()
         out_info["advance_rates"]["terminus"][f"{key}_std"] = data["surge_advance_rate"].std()
-        instability_col = {
-            "bottom_up": "surge_propagation_rate",
-            "top_down": "pre_surge_bulge_speed",
-        }.get(key, None)
 
-        if instability_col is not None:
-            out_info["advance_rates"]["instability"][key] = data[instability_col].median()
-            out_info["advance_rates"]["instability"][f"{key}_std"] = data[instability_col].std()
+        out_info["advance_rates"]["instability"][key] = data["instability_rate"].median()
+        out_info["advance_rates"]["instability"][f"{key}_std"] = data["instability_rate"].std()
 
         out_info["advance_rates"]["stagnation"][key] = data["post_surge_stagnation_rate"].median()
         out_info["advance_rates"]["stagnation"][f"{key}_std"] = data["post_surge_stagnation_rate"].std()
@@ -966,16 +942,6 @@ def surge_statistics(force_redo: bool = False):
     # print(tex3)
 
     return combined_stats
-
-    # for key, data
-    # Check when the top-down low coherence fronts first reached 97% of the glacier length.
-    reaching_front = top_down.loc[(slice(None), "lower_coh", slice(None)), "median"].droplevel(1) >= (
-        top_down.loc[(slice(None), "front", slice(None)), "median"].droplevel(1) * 0.97
-    )
-    reaching_front = reaching_front[reaching_front].groupby(level=0).apply(lambda s: s.index.get_level_values(1)[0])
-
-    # print(top_down.loc[(slice(None), "lower_coh", slice(None))].groupby(level=0).apply(lambda df: print(df.index.get_level_values(0)))
-    # print(top_down.loc[(slice(None), "lower_coh", slice(None))].index)
 
 
 def plot_length_evolution(glacier: str = "arnesen", show: bool = False, force_redo: bool = False):
