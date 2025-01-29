@@ -1,0 +1,9 @@
+{
+"type": "FeatureCollection",
+"name": "photos",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::32633" } },
+"features": [
+{ "type": "Feature", "properties": { "name": "vallakra", "rotation": 280 }, "geometry": { "type": "Point", "coordinates": [ 551048.882939483271912, 8642251.892878662794828 ] } },
+{ "type": "Feature", "properties": { "name": "arnesen", "rotation": 80 }, "geometry": { "type": "Point", "coordinates": [ 568052.622372762183659, 8639826.705689923837781 ] } }
+]
+}
