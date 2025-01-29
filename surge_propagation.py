@@ -30,6 +30,8 @@ GIS_KEYS = {
     "eton": "etonfront",
 }
 
+TEX_VELOCITY_UNIT = "m~d$^{-1}$"
+
 
 def order_surges(glaciers: list[str], all_default: bool = False) -> list[str]:
     """Sort the glacier key list in a predefined order.
@@ -512,16 +514,17 @@ def get_all_length_evolution(force_redo: bool = False):
 
 
 def render_stats_table(stats, out_filepath: Path | None = None, max_title_line_len: int = 5, midrule_col: str | None = None):
+
     nice_names = {
         "reaching_front": "Surge reaching front",
         "surge_start": "Surge start",
         "surge_termination": "Surge termination",
-        "surge_propagation_rate": "Surge propagation rate (m/d)",
-        "instability_rate": "Instability propagation rate (m/d)",
+        "surge_propagation_rate": f"Surge propagation rate ({TEX_VELOCITY_UNIT})",
+        "instability_rate": f"Instability propagation rate ({TEX_VELOCITY_UNIT})",
         "predicted_advance_date": "Latest surge date",
-        "pre_surge_bulge_speed": "Bulge propagation rate (m/d)",
-        "surge_advance_rate": "Surge advance rate (m/d)",
-        "post_surge_stagnation_rate": "Post-surge relaxation rate (m/d)",
+        "pre_surge_bulge_speed": f"Bulge propagation rate ({TEX_VELOCITY_UNIT})",
+        "surge_advance_rate": f"Surge advance rate ({TEX_VELOCITY_UNIT})",
+        "post_surge_stagnation_rate": f"Post-surge relaxation rate ({TEX_VELOCITY_UNIT})",
         "surge_kind": "Surge kind",
     }
 
@@ -772,11 +775,13 @@ def plot_advance_rate_vs_coh_frac(bins, dig, binned_vel):
     plt.boxplot(binned_vel, positions=xmid, widths=5, manage_ticks=False)
 
     plt.xlabel("Fraction of glacier covered (%)")
-    plt.ylabel("Advance/retreat rate (m/d)")
+    plt.ylabel(f"Advance/retreat rate ({TEX_VELOCITY_UNIT.replace('~', ' ')})")
     plt.tight_layout()
     plt.xlim(xmid[0] - box_width, xmid[-1] + box_width)
     plt.xticks(xmid, labels=[f"{bins[i]}-{min(bins[i + 1], 100)}" for i in range(len(xmid))])
     plt.savefig("figures/bottom_up_vel_vs_coh_frac.jpg", dpi=300)
+
+    plt.close()
 
 
 def calc_bottom_up_surge_threshold(data: pd.DataFrame, binsize: int = 10, vel_threshold: float = 0.1, plot: bool = False) -> float:
@@ -837,6 +842,10 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
     bottom_up_surge_frac_threshold = calc_bottom_up_surge_threshold(data=bottom_up, plot=True)
     print(f"Bottom-up surges start at {bottom_up_surge_frac_threshold * 100}% low-coh coverage")
 
+    # bulge_vels = np.empty((0,))
+    # bulge_fracs = np.empty((0,))
+    bulge_stats = pd.DataFrame()
+
     top_down_stats = pd.DataFrame()
     bottom_up_stats = pd.DataFrame()
     for key, data in all_data.groupby(level=0):
@@ -847,6 +856,14 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
 
         if pre_surge.shape[0] > 0:
             if is_top_down:
+
+                new_bulge_stats = pre_surge.loc["lower_coh", ["coh_zone_frac", "vel"]].reset_index()
+                new_bulge_stats["front_distance"] = (pre_surge.loc["front", "median"] - pre_surge.loc["lower_coh", "median"]).values
+                new_bulge_stats["vel_norm"] = new_bulge_stats["vel"] / new_bulge_stats["vel"].median()
+                new_bulge_stats["key"] = key
+
+                bulge_stats = pd.concat([bulge_stats, new_bulge_stats], ignore_index=True)
+                
                 if surge.shape[0] > 0:
                     way_pre_date = pre_surge.index.get_level_values("date").max() - pd.Timedelta(days=365)
                     way_pre_surge = pre_surge.loc[(slice(None), slice(None, way_pre_date)), :]
@@ -889,6 +906,23 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
 
             stats.loc[key, "post_surge_stagnation_rate"] = post_surge.loc["lower_coh", "vel"].mean() * -1
 
+
+    plt.figure()
+    for i, (key, key_data) in enumerate(bulge_stats.groupby("key")):
+        xcol = "coh_zone_frac"
+        plt.scatter(key_data[xcol], key_data["vel_norm"], label=key, marker="o" if i < 9 else "s")
+
+        plt.ylabel("Velocity frac. (value / med)")
+        plt.xlabel({"front_distance": "Distance to front (km)", "coh_zone_frac": "Low coherence expanse fraction"}[xcol])
+
+        # key_data.plot.scatter("front_distance", "vel_norm", label=key, ax=axis)
+
+    xlim = plt.gca().get_xlim()
+    plt.hlines(1, *xlim, color="black", zorder=0)
+    plt.xlim(xlim)
+    plt.legend()
+    plt.savefig("figures/bulge_stats.jpg", dpi=300)
+
     top_down_stats = top_down_stats.sort_values("reaching_front")
     bottom_up_stats = bottom_up_stats.sort_values("surge_start")
 
@@ -898,8 +932,8 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
     _tex = render_stats_table(top_down_stats, tables_dir / "top_down_surge_stats.tex", 5)
     _tex2 = render_stats_table(bottom_up_stats, tables_dir / "bottom_up_surge_stats.tex")
 
-    top_down_stats["surge_kind"] = "TD"
-    bottom_up_stats["surge_kind"] = "BU"
+    top_down_stats["surge_kind"] = "D"
+    bottom_up_stats["surge_kind"] = "U"
     combined_stats = pd.concat([top_down_stats, bottom_up_stats])
     combined_stats.insert(0, "surge_kind", combined_stats.pop("surge_kind"))
 
@@ -936,6 +970,9 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
 
     info = record_information(out_info)
 
+    combined_stats.drop(columns=["reaching_front"], inplace=True)
+
+    print(combined_stats.loc["doktor"])
     # print(json.dumps(info, indent=2))
 
     tex3 = render_stats_table(combined_stats, tables_dir / "combined_surge_stats.tex", midrule_col="surge_kind")
@@ -1304,7 +1341,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
     groups = {
         "Progressing surge bulges": {
             "loc": (2, 0),
-            "glaciers": [["doktor", "edvard"]],
+            "glaciers": [["edvard", "doktor"]],
         },
         "Top-down (bulge) initiated surges": {
             "loc": (0, 2),
@@ -1333,7 +1370,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
 
     # The shape of the subplot2grid layout
     gridshape = (3, n_cols)
-    margins = {"left": 0.04, "bottom": 0.056, "right": 0.99, "top": 0.947, "wspace": 0.274, "hspace": 0.256}
+    margins = {"left": 0.04, "bottom": 0.056, "right": 0.99, "top": 0.987, "wspace": 0.274, "hspace": 0.256}
     # The separator lines for different parts of the figure needs shifting a bit
     grid_shift_top = 0.03
     grid_shift_right = 0.005
@@ -1351,7 +1388,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
     overview_plot_kwargs = {"ax": overview_axis, "edgecolor": "black", "linewidth": 0.05}
     outlines.dissolve().plot(color="lightgray", **overview_plot_kwargs)
     # glacier_outlines.plot(column="used")
-    plt.text(0.01, 0.99, "a)", fontsize=8, va="top", transform=fig.transFigure)
+    plt.text(0.01, 0.99, "a", fontsize=9, va="top", transform=fig.transFigure)
 
     # Add an outline rectangle to the overview map
     fig.patches.append(plt.Rectangle((0, overview_bottom), overview_right, 1 - overview_bottom, transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
@@ -1384,10 +1421,10 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
         groups[group]["rect"] = rect
 
         # Add an outline rectangle.
-        fig.patches.append(plt.Rectangle((rect["start_x"], rect["start_y"]), rect["width"], rect["height"], transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
+        # fig.patches.append(plt.Rectangle((rect["start_x"], rect["start_y"]), rect["width"], rect["height"], transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
 
         # Add the title of the group
-        plt.text(rect["start_x"] + rect["width"] / 2, rect["start_y"] + rect["height"] - 0.03, group, ha="center", transform=fig.transFigure) 
+        # plt.text(rect["start_x"] + rect["width"] / 2, rect["start_y"] + rect["height"] - 0.03, group, ha="center", transform=fig.transFigure) 
 
         # Add each glacier
         for row_n, row in enumerate(glaciers):
@@ -1408,7 +1445,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                     closest_upper = data.loc["upper_coh"].sort_values("date_diff_to_start").iloc[0]
                     lims["surge_start_coh"] = (closest_upper["median"], closest_lower["median"])
 
-                    plt.vlines(surge_start, ylim[0], closest_lower["median"], linestyles="--", color="darkgray", linewidth=1)
+                    plt.vlines(surge_start, ylim[0], closest_lower["median"], linestyles="--", color="darkgray", linewidth=2)
                     surge_start = matplotlib.dates.date2num(surge_start)
                 else:
                     surge_start = xlim[0]
@@ -1420,7 +1457,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
 
                     lims["surge_termination_coh"] = (closest_upper["median"], closest_lower["median"])
 
-                    plt.vlines(surge_termination, ylim[0], closest_lower["median"], linestyles=":", color="darkgray", linewidth=1)
+                    plt.vlines(surge_termination, ylim[0], closest_lower["median"], linestyles=":", color="darkgray", linewidth=2)
                     surge_termination = matplotlib.dates.date2num(surge_termination)
                 else:
                     surge_termination = xlim[1]
@@ -1435,7 +1472,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                     y_line = np.mean(surge_ylim)
                     x_mid = np.mean([surge_start, surge_termination])
 
-                    text = plt.annotate("Surge", (x_mid, y_line), ha="center", va="bottom", fontsize=9, color="white", path_effects=[matplotlib.patheffects.withStroke(linewidth=0.5, foreground="black")])
+                    text = plt.annotate("Surge", (x_mid, y_line), ha="center", va="bottom", fontsize=9, color="white")#, path_effects=[matplotlib.patheffects.withStroke(linewidth=0.5, foreground="black")])
 
                     bbox = matplotlib.transforms.TransformedBbox(text.get_window_extent(), plt.gca().transData.inverted())
 
@@ -1448,9 +1485,9 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                         text.remove()
                         
                     
-                    plt.hlines(y_line, surge_start, surge_termination, color="darkgray")
+                    plt.hlines(y_line, surge_start, surge_termination, color="darkgray", linewidth=1)
                     
-                letter = "abcdefghijklmnopqrstuvx"[i] + ")"
+                letter = "abcdefghijklmnopqrstuvx"[i]
                 plt.text(
                     0.01,
                     0.99,
@@ -1482,7 +1519,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
         overview_labels["s"],
         x_scatter=overview_labels["x"],
         y_scatter=overview_labels["y"],
-        textsize=8,
+        textsize=9,
         draw_lines=False,
         min_distance=0.,
         margin=0.,
