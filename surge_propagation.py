@@ -23,8 +23,6 @@ import collections.abc
 
 from main import CACHE_DIR
 
-S1_DIR = Path("/media/storage/Erik/Projects/UiO/S1_animation/")
-
 GIS_KEYS = {
     "vallakra": "vallakrabreen",
     "eton": "etonfront",
@@ -174,8 +172,6 @@ def get_glacier_data(
 ) -> tuple[gpd.GeoDataFrame, shapely.geometry.LineString, shapely.geometry.Polygon, gpd.GeoDataFrame]:
     """Load data about a glacier from its key.
 
-    Note that the data are loaded from two places; "GIS/shapes/" and the directory defined by `S1_DIR`.
-
     Parameters
     ----------
     glacier
@@ -192,8 +188,7 @@ def get_glacier_data(
     """
     gis_key = GIS_KEYS.get(glacier, glacier)
 
-    gis_dir = S1_DIR / f"GIS/shapes/{gis_key}/"
-    front_positions = gpd.read_file(gis_dir / "front_positions.geojson")
+    front_positions = gpd.read_file(f"GIS/shapes/{gis_key}/front_positions.geojson")
     front_positions["date"] = pd.to_datetime(front_positions["date"])
 
     crs = front_positions.crs
