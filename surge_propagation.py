@@ -32,6 +32,8 @@ GIS_KEYS = {
 
 TEX_VELOCITY_UNIT = "m~d$^{-1}$"
 
+ETONBREEN_SURGE_START = pd.Timestamp("2023-11-11")  # See the paper for why we hardcode it
+
 
 def order_surges(glaciers: list[str], all_default: bool = False) -> list[str]:
     """Sort the glacier key list in a predefined order.
@@ -573,7 +575,8 @@ def render_stats_table(stats, out_filepath: Path | None = None, max_title_line_l
                 months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
                 value = f"{months[value.month - 1]}. {value.year}"
             elif isinstance(value, float):
-                value = round(value * 100) / 100
+                # value = round(value * 10) / 10
+                value = format_float(value)
             row.append(str(value))
 
         tex.append("\t" + "&".join(row) + r"\\")
@@ -620,7 +623,7 @@ def rec_to_tex_macros(dictionary: dict, pre_key: str = "", i: int = 0, max_i: in
 
     return macros
     
-def format_float(number: float, decimals: int = 2) -> str:
+def format_float(number: float, decimals: int = 1) -> str:
     """
 
     Examples
@@ -718,7 +721,7 @@ def classify_surge_stages(key: str, data: pd.DataFrame, bottom_up_surge_frac_thr
 
         # coh_zone_width = data.loc["front", "median"] - data.loc["upper_coh", "median"]
         if key == "eton":
-            surge_start_date = pd.Timestamp("2023-11-11")
+            surge_start_date = ETONBREEN_SURGE_START
         else:
             surge_start_date = (
                 data.loc["front", "coh_zone_frac"]
@@ -765,20 +768,22 @@ def classify_surge_stages(key: str, data: pd.DataFrame, bottom_up_surge_frac_thr
 
 
 def plot_advance_rate_vs_coh_frac(bins, dig, binned_vel):
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(4, 2.5))
 
     binsize = np.mean(np.diff(bins))
 
     xmid = (bins[1:] - np.diff(bins) / 2)[np.unique(dig) - 1]
     plt.hlines(0, bins[0], bins[-1], color="black", linestyles=":", alpha=0.4)
     box_width = binsize / 2
-    plt.boxplot(binned_vel, positions=xmid, widths=5, manage_ticks=False)
+    plt.boxplot(binned_vel, positions=xmid, widths=5, manage_ticks=False, showfliers=False, medianprops={"color": "black", "linewidth": 2})
+    # plt.violinplot(binned_vel, positions=xmid, widths=5)
 
     plt.xlabel("Fraction of glacier covered (%)")
     plt.ylabel(f"Advance/retreat rate ({TEX_VELOCITY_UNIT.replace('~', ' ')})")
-    plt.tight_layout()
+    plt.gca().get_yaxis().set_label_coords(-0.1, 0.4)
     plt.xlim(xmid[0] - box_width, xmid[-1] + box_width)
-    plt.xticks(xmid, labels=[f"{bins[i]}-{min(bins[i + 1], 100)}" for i in range(len(xmid))])
+    plt.xticks(xmid, labels=[f"{bins[i]}-{min(bins[i + 1], 100)}" for i in range(len(xmid))], rotation=30, ha="right")
+    plt.subplots_adjust(left=0.13, bottom=0.26, right=0.99, top=0.99)
     plt.savefig("figures/bottom_up_vel_vs_coh_frac.jpg", dpi=300)
 
     plt.close()
@@ -889,7 +894,10 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
                     stats.loc[key, "predicted_advance_date"] = intercept_time
 
         if surge.shape[0] > 0:
-            stats.loc[key, "surge_start"] = surge.loc["lower_coh"].index[0]
+            if key == "eton":
+                stats.loc[key, "surge_start"] = ETONBREEN_SURGE_START
+            else:
+                stats.loc[key, "surge_start"] = surge.loc["lower_coh"].index[0]
             if is_top_down:
                 stats.loc[key, "reaching_front"] = surge.loc["lower_coh"].index[0]
             first_year_surge = surge.loc[
@@ -922,6 +930,7 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
     plt.xlim(xlim)
     plt.legend()
     plt.savefig("figures/bulge_stats.jpg", dpi=300)
+    plt.close()
 
     top_down_stats = top_down_stats.sort_values("reaching_front")
     bottom_up_stats = bottom_up_stats.sort_values("surge_start")
@@ -932,8 +941,8 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
     _tex = render_stats_table(top_down_stats, tables_dir / "top_down_surge_stats.tex", 5)
     _tex2 = render_stats_table(bottom_up_stats, tables_dir / "bottom_up_surge_stats.tex")
 
-    top_down_stats["surge_kind"] = "D"
-    bottom_up_stats["surge_kind"] = "U"
+    top_down_stats["surge_kind"] = r"$\downarrow$"
+    bottom_up_stats["surge_kind"] = r"$\uparrow$"
     combined_stats = pd.concat([top_down_stats, bottom_up_stats])
     combined_stats.insert(0, "surge_kind", combined_stats.pop("surge_kind"))
 
@@ -972,7 +981,6 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
 
     combined_stats.drop(columns=["reaching_front"], inplace=True)
 
-    print(combined_stats.loc["doktor"])
     # print(json.dumps(info, indent=2))
 
     tex3 = render_stats_table(combined_stats, tables_dir / "combined_surge_stats.tex", midrule_col="surge_kind")
@@ -981,7 +989,127 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
     return combined_stats
 
 
-def plot_length_evolution(glacier: str = "arnesen", show: bool = False, force_redo: bool = False):
+def surge_geometry_statistics():
+
+    glaciers = gpd.read_file("GIS/shapes/glaciers.geojson")
+
+    rgi = gpd.read_file("zip://GIS/shapes/RGI2000-v7.0-G-07_svalbard_jan_mayen.zip/RGI2000-v7.0-G-07_svalbard_jan_mayen.shp").to_crs(glaciers.crs)
+
+    geometric_stats = glaciers.sjoin(rgi).set_index("key")
+
+    stats = surge_statistics()
+    geometric_stats["zrange"] = geometric_stats["zmax_m"] - geometric_stats["zmin_m"]
+    geometric_stats["tidewater"] = (geometric_stats["term_type"] == 1).astype(int)
+    geometric_stats["geometry"] = geometric_stats["geometry"].centroid
+
+    cols = ["zrange", "area_km2", "lmax_m", "slope_deg", "tidewater", "geometry"]
+    stats[cols] = geometric_stats.loc[stats.index, cols]
+
+    stats = gpd.GeoDataFrame(stats.drop(columns=["geometry"]), geometry=stats["geometry"], crs=glaciers.crs)
+
+    stats.to_file("temp/surge_stats_with_geometric.geojson")
+
+    stats.to_csv("temp/surge_stats_with_geometric.csv")
+    stats["down_glacier_propagation"] = (stats["surge_kind"] == "D").astype(int)
+
+
+
+    if False:
+        from sklearn.linear_model import LinearRegression
+        from sklearn.inspection import permutation_importance
+
+        data = stats.select_dtypes(np.number).dropna(axis="columns", how="any")
+
+        ycols = ["instability_rate", "surge_advance_rate", "post_surge_stagnation_rate"]
+
+        for ycol in ycols:
+            data = stats.select_dtypes(np.number).dropna(axis="rows", subset=ycol, how="any").dropna(axis="columns", how="any")
+
+            xvals = data.drop(columns=[ycol])
+            yvals = data[[ycol]]
+
+            model = LinearRegression().fit(xvals, yvals)
+
+            result = permutation_importance(model, xvals, yvals, n_repeats=30, random_state=42, scoring='neg_mean_squared_error')
+
+            print(f"Predicting {ycol} with n={data.shape[0]}: score: r={model.score(xvals, yvals):.2f}")
+            permutation_importance_df = pd.DataFrame({
+                'Feature': xvals.columns,
+                'Importance': result.importances_mean,
+                'Std_Dev': result.importances_std,
+                "Coefficient": model.coef_.ravel(),
+            })
+
+            print(permutation_importance_df.sort_values("Importance").round(2))
+            print("\n\n")
+
+
+
+    if True:
+        numeric = stats.select_dtypes(np.number)
+        corr = numeric.corr()
+        plt.figure(figsize=(8.3, 8.3))
+        plt.imshow(corr, cmap="coolwarm", interpolation="nearest", vmin=-1, vmax=1)
+
+        nice_names = {
+            "reaching_front": "Surge reaching front",
+            "surge_start": "Surge start",
+            "surge_termination": "Surge termination",
+            "surge_propagation_rate": f"Surge propagation rate",
+            "instability_rate": f"Low-coherence front propagation rate",
+            "predicted_advance_date": "Latest surge date",
+            "pre_surge_bulge_speed": f"Bulge propagation rate",
+            "surge_advance_rate": f"Surge advance rate",
+            "post_surge_stagnation_rate": f"Post-surge relaxation rate",
+            "surge_kind": "Surge kind",
+            "zrange": "Elev. range",
+            "area_km2": "Area",
+            "lmax_m": "Length",
+            "slope_deg": "Slope",
+            "tidewater": "Is tidewater",
+            "down_glacier_propagation": "Propagates down-glacier",
+        }
+
+        plt.xticks(np.arange(corr.shape[1])[:-1],[nice_names.get(s, s) for s in corr.columns][:-1], rotation=30, ha="right")
+        plt.yticks(np.arange(corr.shape[0])[1:], [nice_names.get(s, s) for s in corr.index][1:])
+        for (i, j), val in np.ndenumerate(corr):
+            plt.text(j, i, f"{val:.2g}", ha="center", va="center", fontsize=12, fontweight=("bold" if abs(val) > 0.5 else "normal"))
+
+            if i == j == 5:
+                print(~numeric[[numeric.columns[i], numeric.columns[j]]].isna())
+            n_points = np.count_nonzero((~numeric[[numeric.columns[i], numeric.columns[j]]].isna()).all(axis="columns"))
+            # n_points = stats.dropna(axis="rows", subset=stats.columns[i], how="any").dropna(axis="rows", subset=stats.columns[j], how="any").shape[0]
+            plt.text(j, i + 0.3, f"n={n_points}", ha="center", va="top", fontsize=8)
+            # print(i, j, val)
+            #
+        mask = np.triu(np.ones_like(corr, dtype=bool))
+        # plt.imshow(np.ma.masked_array(mask, mask=mask), cmap="Greys_r", interpolation="nearest")
+        # Apply mask
+        for i in range(corr.shape[0]):
+            for j in range(corr.shape[1]):
+                if mask[i, j]:
+                    plt.gca().add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1, color='white', lw=0, zorder=100))
+
+
+        plt.tight_layout()
+
+        plt.savefig("figures/surge_stats_correlation.jpg", dpi=300)
+
+        plt.show()
+
+
+    # plt.scatter(stats["zrange"], stats["surge_advance_rate"])
+    # plt.show()
+
+
+    # key_to_rgi = {
+
+    # }
+
+    
+
+
+def plot_length_evolution(glacier: str = "arnesen", show: bool = False, force_redo: bool = False, fontsize: int = 8):
     try:
         name = gpd.read_file("GIS/shapes/glaciers.geojson").query(f"key == '{glacier}'").iloc[0]["name"]
     except IndexError as exception:
@@ -1052,12 +1180,16 @@ def plot_length_evolution(glacier: str = "arnesen", show: bool = False, force_re
 
     plt.xlim(np.min(data.index.get_level_values(1)), np.max(data.index.get_level_values(1)))
 
-    plt.text(0.5, 0.97, name, transform=plt.gca().transAxes, va="top", ha="center", fontsize=9)
+    plt.text(0.5, 0.97, name, transform=plt.gca().transAxes, va="top", ha="center", fontsize=fontsize)
 
     xticks = plt.gca().get_xticks()
 
-    plt.xticks([int(xticks[1]), xticks[int(len(xticks) / 2)], xticks[-2]], fontsize=8)
-    plt.yticks(fontsize=8)
+    # Late phase review quick-fix
+    if glacier == "nordsyssel":
+        plt.xticks([int(xticks[2]), int(xticks[-2])], fontsize=fontsize)
+    else:
+        plt.xticks([int(xticks[1]), int(xticks[int(len(xticks) / 2)]), int(xticks[-2])], fontsize=fontsize)
+    plt.yticks(fontsize=fontsize)
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
     plt.gca().yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
 
@@ -1388,7 +1520,8 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
     overview_plot_kwargs = {"ax": overview_axis, "edgecolor": "black", "linewidth": 0.05}
     outlines.dissolve().plot(color="lightgray", **overview_plot_kwargs)
     # glacier_outlines.plot(column="used")
-    plt.text(0.01, 0.99, "a", fontsize=9, va="top", transform=fig.transFigure)
+    label_fontsize = 11
+    plt.text(0.01, 0.99, "a", fontsize=label_fontsize, va="top", transform=fig.transFigure)
 
     # Add an outline rectangle to the overview map
     fig.patches.append(plt.Rectangle((0, overview_bottom), overview_right, 1 - overview_bottom, transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
@@ -1432,7 +1565,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                 glacier_point = glacier_points.query(f"key == '{glacier}'").iloc[0]
                 axis = plt.subplot2grid(gridshape, (start_loc[0] + row_n, start_loc[1] + col_n))
 
-                data = plot_length_evolution(glacier, force_redo=force_redo)
+                data = plot_length_evolution(glacier, force_redo=force_redo, fontsize=label_fontsize - 2)
 
                 lims = {}
                 ylim = plt.gca().get_ylim()
@@ -1472,7 +1605,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                     y_line = np.mean(surge_ylim)
                     x_mid = np.mean([surge_start, surge_termination])
 
-                    text = plt.annotate("Surge", (x_mid, y_line), ha="center", va="bottom", fontsize=9, color="white")#, path_effects=[matplotlib.patheffects.withStroke(linewidth=0.5, foreground="black")])
+                    text = plt.annotate("Surge", (x_mid, y_line), ha="center", va="bottom", fontsize=label_fontsize, color="white")#, path_effects=[matplotlib.patheffects.withStroke(linewidth=0.5, foreground="black")])
 
                     bbox = matplotlib.transforms.TransformedBbox(text.get_window_extent(), plt.gca().transData.inverted())
 
@@ -1493,7 +1626,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
                     0.99,
                     letter,
                     transform=axis.transAxes,
-                    fontsize=9,
+                    fontsize=label_fontsize,
                     ha="left",
                     va="top",
                 )
@@ -1543,7 +1676,7 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
     # For some reason, this call is needed here and not above. Maybe from the subplots_adjust?
     overview_axis.set_position([0.01, overview_bottom + 0.01, overview_right - 0.01, 1 - overview_bottom - 0.01]) 
     # Add a y-axis label
-    plt.text(0.01, list(groups.values())[0]["rect"]["height"] / 2, "Distance (km)", rotation=90, ha="center", va="center", transform=fig.transFigure, fontsize=8)
+    plt.text(0.01, list(groups.values())[0]["rect"]["height"] / 2, "Distance (km)", rotation=90, ha="center", va="center", transform=fig.transFigure, fontsize=11)
 
     plt.savefig("figures/surge_front_evolution.jpg", dpi=300)
 

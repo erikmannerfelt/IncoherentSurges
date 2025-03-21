@@ -1,6 +1,8 @@
 asf-search
 hyp3-sdk
 matplotlib
+seaborn
+scikit-learn
 numpy
 scipy
 pandas

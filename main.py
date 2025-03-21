@@ -381,7 +381,7 @@ def main():
     
 def make_coh_vrts():
 
-    insar_files = sorted(list(Path("insar/").glob("S1*.zip")))
+    insar_files = sorted(list(Path("insar/").glob("S1*.zip")), key=lambda fp: fp.stem.split("_")[1])
     # import rasterio
     from osgeo import gdal
     gdal.UseExceptions()
@@ -426,6 +426,8 @@ def make_coh_vrts():
     for orbit in orbits:
 
         
+        if orbit["start_time"].year == 2025:
+            print(orbit["files"])
         out_file = Path(f"vrts/per_orbit/{orbit['start_time'].year}/{orbit['pol']}/{orbit['sat']}_{orbit['start_time'].strftime('%Y%m%d')}_{orbit['pol']}.vrt")
 
         out_file.parent.mkdir(exist_ok=True, parents=True)
