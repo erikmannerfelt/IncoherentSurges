@@ -1,6 +1,7 @@
 import datetime
 import fnmatch
 import glob
+import hashlib
 import time
 import warnings
 from pathlib import Path
@@ -12,7 +13,6 @@ import hyp3_sdk
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import projectfiles
 import pyproj
 import shapely
 import shapely.geometry
@@ -22,6 +22,9 @@ import tqdm.contrib.concurrent
 CACHE_DIR = Path(__file__).parent / "cache"
 
 
+def get_checksum(objects):
+    return hashlib.sha256("".join(map(str, objects)).encode()).hexdigest()
+
 def query_scenes(
     roi: shapely.geometry.Polygon | shapely.geometry.Point,
     max_results: int | None = 5,
@@ -29,7 +32,7 @@ def query_scenes(
     start_date: pd.Timestamp | None = None,
     end_date: pd.Timestamp | None = None,
 ) -> gpd.GeoDataFrame:
-    checksum = projectfiles.get_checksum(
+    checksum = get_checksum(
         [roi.wkt, max_results, platform, start_date, end_date]
     )
 
@@ -82,7 +85,7 @@ def query_baselines(
 ) -> gpd.GeoDataFrame:
     scene_names = [str(name) for name in scene_names]
 
-    checksum = projectfiles.get_checksum(
+    checksum = get_checksum(
         [scene_names, max_temporal_baseline_days, min_temporal_baseline_days]
     )
 
@@ -100,7 +103,6 @@ def query_baselines(
             search_start = stop_time - pd.Timedelta(days=max_temporal_baseline_days)
             search_stop = stop_time
 
-            # help(result.get_stack_opts)
             stack_opts = ref.get_stack_opts()
             stack_opts.start = search_start.isoformat()
             stack_opts.end = search_stop.isoformat()
@@ -224,9 +226,6 @@ def filter_existing_baselines(baselines: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         if len(filtered_matches) == 0:
             continue
 
-        # if len(matches) > 1:
-        #     raise ValueError(f"Pattern {baseline['product_glob']} matched multiple files")
-
         files_present.append(i)
 
     baselines.drop(files_present, inplace=True)
@@ -280,8 +279,6 @@ def report_jobs(
         if verbose:
             print(f"{now_str()}: Awaiting {len(running_jobs)} jobs")
 
-        # hyp3_instance.watch(running_jobs, timeout=20000)
-
     failed_jobs = jobs.filter_jobs(
         succeeded=False,
         running=False,
@@ -317,10 +314,6 @@ def download_baselines(
     splits = splits[splits < baselines.shape[0]]
     batches = np.split(baselines.index, splits)
 
-    # print(f"Temporary break: {baselines.shape[0]} jobs to go")
-    # return
-
-    # while
     jobs = hyp3_sdk.Batch()
     for _, baseline in baselines.iterrows():
         while (
@@ -403,12 +396,6 @@ def main():
         (baselines["ref_time"].dt.month < 5) & (baselines["other_time"].dt.month >= 1)
     ]
 
-    # TEMPORARY. For testing
-    # baselines = baselines[baselines["ref_time"].dt.year == 2024]
-    # baselines = baselines.iloc[:3]
-
-    # baselines = baselines.query('flightDirection == "DESCENDING"')
-
     to_process = filter_existing_baselines(baselines)
 
     print(
@@ -417,29 +404,15 @@ def main():
 
     if to_process.shape[0] == 0:
         print("All scenes exist")
-        # raise NotImplementedError("There may still be un-downloaded scenes. A final download pass is not implemented.")
-        # return
 
     download_baselines(to_process)
 
-    # print(baselines[baselines["other_time"].dt.month < 5])
-    # print(files_present)
-
-    # print(help(results[0].stack))
-
-    # start_time = all_meta.iloc[0]["stopTime"] - pd.Timedelta(days=24)
-    # end_time = all_meta.iloc[0]["stopTime"] + pd.Timedelta(days=24)
-
-    # print(results[0].stack(opts=asf_search.ASFSearchOptions(start=start_time.isoformat().replace("+00:00", "Z"), end=end_time.isoformat().replace("+00:00", "Z"))))
-
-    # print(result[0].stack)
 
 
 def make_coh_vrts():
     insar_files = sorted(
         list(Path("insar/").glob("S1*.zip")), key=lambda fp: fp.stem.split("_")[1]
     )
-    # import rasterio
     from osgeo import gdal
 
     gdal.UseExceptions()
@@ -498,40 +471,6 @@ def make_coh_vrts():
         out_file.parent.mkdir(exist_ok=True, parents=True)
 
         gdal.BuildVRT(str(out_file), orbit["files"])
-
-        # paths.append(str(vrt_filepath.absolute()))
-
-        # print(filename, start_time)
-
-        # print(diff)
-        # if diff.total_seconds() > 120:
-        #     if len(paths) > 2:
-        #         date_str = start_time.strftime("%Y%m%d")
-        #         out_file = Path(f"vrts/per_orbit/{start_time.year}/{pol}/{sat}_{date_str}_{pol}.vrt")
-
-        #         out_file.parent.mkdir(exist_ok=True, parents=True)
-
-        #         print(paths[:-1])
-        #         return
-        #         gdal.BuildVRT(str(out_file), paths[:-1])
-        #     paths = [paths[-1]]
-
-        # continue
-
-        # year = int(zip_path.stem[5:9])
-
-        # out_file = Path(f"vrts/{year}/{zip_path.stem}_corr.vrt")
-
-        # if out_file.is_file():
-        #     continue
-
-        # out_file.parent.mkdir(exist_ok=True, parents=True)
-
-        # gdal.BuildVRT(str(out_file), filename)
-
-        # with rasterio.open(filename) as raster:
-        #     print(raster)
-
 
 if __name__ == "__main__":
     main()

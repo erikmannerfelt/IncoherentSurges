@@ -517,43 +517,22 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
         data.loc["front"].index, data.loc["front"].index
     ).diff().dt.total_seconds() / (3600 * 24)
     for kind, kind_data in data.groupby(level=0):
-        # if kind not in lengths_raw:
-        #     continue
+        shifted = kind_data.shift(1)
+        dt_days_multi = to_multiindex(dt_days, str(kind))
 
-        if False:
-            vel_cols = ["upper", "lower", "std"]
+        data.loc[kind, "vel"] = (
+            kind_data["median"] - shifted["median"]
+        ) / dt_days_multi
 
-            if (kind_data["median"] == 0.0).all():
-                data.loc[kind, ["vel"] + [f"vel_{key}" for key in vel_cols]] = 0
-                continue
+        vel_upper = kind_data["upper"] - shifted["upper"]
+        vel_lower = kind_data["lower"] - shifted["lower"]
 
-            velocities = measure_velocity(lengths_raw[kind]).set_index("date_to")
-            velocities.index.name = "date"
-            velocities = to_multiindex(
-                velocities.reindex(all_dates).interpolate().ffill().bfill(), kind
-            )
-
-            data.loc[kind, "vel"] = velocities["median"]
-
-            for key in vel_cols:
-                data.loc[kind, f"vel_{key}"] = velocities[key]
-        else:
-            shifted = kind_data.shift(1)
-            dt_days_multi = to_multiindex(dt_days, str(kind))
-
-            data.loc[kind, "vel"] = (
-                kind_data["median"] - shifted["median"]
-            ) / dt_days_multi
-
-            vel_upper = kind_data["upper"] - shifted["upper"]
-            vel_lower = kind_data["lower"] - shifted["lower"]
-
-            data.loc[kind, "vel_upper"] = (
-                np.where(vel_upper > vel_lower, vel_upper, vel_lower) / dt_days_multi
-            )
-            data.loc[kind, "vel_lower"] = (
-                np.where(vel_upper > vel_lower, vel_lower, vel_upper) / dt_days_multi
-            )
+        data.loc[kind, "vel_upper"] = (
+            np.where(vel_upper > vel_lower, vel_upper, vel_lower) / dt_days_multi
+        )
+        data.loc[kind, "vel_lower"] = (
+            np.where(vel_upper > vel_lower, vel_lower, vel_upper) / dt_days_multi
+        )
 
     # Convert units from m to km
     data[num_cols] /= 1000
@@ -843,11 +822,6 @@ def classify_surge_stages(
                 .index[0]
             )
 
-            # coh_is_surge = coh_zone_width > bottom_up_surge_length_threshold
-            # surge_start_date = coh_is_surge[coh_is_surge].index[0]
-
-        # bottom_up_stats.loc[key, "surge_start"] = surge_start_date
-
         stage = pd.Series(
             np.zeros(data.loc["lower_coh"].shape[0]), data.loc["lower_coh"].index
         )
@@ -870,20 +844,11 @@ def classify_surge_stages(
         "surge": stage[stage == 1].index,
         "post_surge": stage[stage == 2].index,
     }
-    # pre_surge_index =
-    # surge_index = stage[stage == 1].index)
-    # post_surge_index = stage[stage == 2].index
 
     return {
         key: data.loc[(slice(None), idx), :].sort_index()
         for key, idx in indexes.items()
     }
-    # for key, idx in [("pre_surge", pre_surge_index
-
-    # pre_surge = data.loc[(slice(None), [*stage[stage == 0].index, *stage[stage == 1].index[:1]]), :].sort_index()
-
-    # surge = data.loc[(slice(None), stage[stage == 1].index), :].sort_index()
-    # post_surge = data.loc[(slice(None), stage[stage == 2].index), :].sort_index()
 
 
 def plot_advance_rate_vs_coh_frac(bins, dig, binned_vel):
@@ -902,8 +867,6 @@ def plot_advance_rate_vs_coh_frac(bins, dig, binned_vel):
         showfliers=False,
         medianprops={"color": "black", "linewidth": 2},
     )
-    # plt.violinplot(binned_vel, positions=xmid, widths=5)
-
     plt.xlabel("Fraction of glacier covered (%)")
     plt.ylabel(f"Advance/retreat rate ({TEX_VELOCITY_UNIT.replace('~', ' ')})")
     plt.gca().get_yaxis().set_label_coords(-0.1, 0.4)
@@ -959,7 +922,6 @@ def calc_bottom_up_surge_threshold(
 
     advancing_mask = np.array([np.median(vals) for vals in binned_vel]) > vel_threshold
     bottom_up_surge_frac_threshold = bins[1:][advancing_mask][0] / 100
-    # bottom_up_surge_threshold = xmid[advancing_mask][0] / 100
 
     if plot:
         plot_advance_rate_vs_coh_frac(bins=bins, dig=dig, binned_vel=binned_vel)
@@ -987,8 +949,6 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
         f"Bottom-up surges start at {bottom_up_surge_frac_threshold * 100}% low-coh coverage"
     )
 
-    # bulge_vels = np.empty((0,))
-    # bulge_fracs = np.empty((0,))
     bulge_stats = pd.DataFrame()
 
     top_down_stats = pd.DataFrame()
@@ -1192,15 +1152,11 @@ def surge_statistics(force_redo: bool = False) -> pd.DataFrame:
 
     combined_stats.drop(columns=["reaching_front"], inplace=True)
 
-    # print(json.dumps(info, indent=2))
-
-    tex3 = render_stats_table(
+    _tex3 = render_stats_table(
         combined_stats,
         tables_dir / "combined_surge_stats.tex",
         midrule_col="surge_kind",
     )
-    # print(tex3)
-
     return combined_stats
 
 
@@ -1326,12 +1282,9 @@ def surge_geometry_statistics():
                     axis="columns"
                 )
             )
-            # n_points = stats.dropna(axis="rows", subset=stats.columns[i], how="any").dropna(axis="rows", subset=stats.columns[j], how="any").shape[0]
             plt.text(j, i + 0.3, f"n={n_points}", ha="center", va="top", fontsize=8)
-            # print(i, j, val)
-            #
+
         mask = np.triu(np.ones_like(corr, dtype=bool))
-        # plt.imshow(np.ma.masked_array(mask, mask=mask), cmap="Greys_r", interpolation="nearest")
         # Apply mask
         for i in range(corr.shape[0]):
             for j in range(corr.shape[1]):
@@ -1348,13 +1301,6 @@ def surge_geometry_statistics():
 
         plt.show()
 
-    # plt.scatter(stats["zrange"], stats["surge_advance_rate"])
-    # plt.show()
-
-    # key_to_rgi = {
-
-    # }
-
 
 def plot_length_evolution(
     glacier: str = "arnesen",
@@ -1370,11 +1316,6 @@ def plot_length_evolution(
         )
     except IndexError as exception:
         raise ValueError(f"Key '{glacier}' not in glaciers.geojson") from exception
-    # names = {
-    #     "vallakra": "Vallåkrabreen",
-    #     "natascha": "Paulabreen",
-    #     "sefstrom": "Sefströmbreen",
-    # }
 
     data = get_length_evolution(glacier=glacier, force_redo=force_redo)
 
@@ -1405,8 +1346,6 @@ def plot_length_evolution(
             "zorder": 1,
         },
     }
-    # zorders = {"front": 3, "lower_coh": 2, "upper_coh": 1}
-    # colors = {"front": "blue", "lower_coh": "red", "upper_coh": "green"}
     for kind, kind_data in data.groupby(level=0):
         params = all_params[str(kind)]
 
@@ -1450,9 +1389,6 @@ def plot_length_evolution(
         plt.ylim(max(ymin - yrange * 0.4, 0), ymax + yrange * 0.2)
     else:
         plt.ylim(0, ymax * 1.15)
-    # plt.ylim(0 if glacier not in ["eton"] else max(ymin - yrange * 0.1, 0), ymax )
-    # yrange = plt.gca().get_ylim()[1] - data[data["exact"]]["median"].min()
-    # plt.ylim(max(plt.gca().get_ylim()[1] - (yrange * 1.1), 0), plt.gca().get_ylim()[1])
 
     plt.xlim(
         np.min(data.index.get_level_values(1)), np.max(data.index.get_level_values(1))
@@ -1529,15 +1465,9 @@ def old_plot_length_evolution(glacier: str = "arnesen"):
             [lower_coh_lengths_raw, advancing_front_positions_raw]
         ).sort_values("date")
 
-        # print(front_lengths[front_lengths["median"].diff() > 0])
-        # lower_coh_lengths = lower_coh_lengths[lower_coh_lengths["median"] < front_lengths["median"].max()]
-
-        # lower_coh_lengths = pd.concat([lower_coh_lengths, front_lengths[front_lengths["date"] > lower_coh_lengths["date"].max()]])
 
         velocities["lower_coh"] = measure_velocity(lower_coh_lengths_raw)
     except KeyError:
-        # lower_coh_lengths = pd.DataFrame(columns=["median", "lower", "upper", "date"])
-
         lower_coh_lengths_raw = lower_coh_lengths = None
 
     try:
@@ -1545,22 +1475,12 @@ def old_plot_length_evolution(glacier: str = "arnesen"):
             upper_coh_boundary, centerline, domain, buffer_radius
         )
         velocities["upper_coh"] = measure_velocity(upper_coh_lengths_raw)
-        # print(upper_coh_lengths_raw)
     except KeyError:
         upper_coh_lengths_raw = upper_coh_lengths = None
-
-    # velocities = {key: measure_velocity(data) for key, data in [("terminus", front_lengths_raw), "lower_coh", "upper_coh")]
 
     Path("figures/").mkdir(exist_ok=True)
 
     fig = plt.figure(figsize=(8, 5))
-    # plt.subplot(1, 2, 1)
-    # all_idx = np.unique(np.r_[upper_coh_lengths["date"], lower_coh_lengths["date"]])
-    # all_coh = pd.DataFrame(index=all_idx)
-    # for name, df in [("lower", lower_coh_lengths), ("upper", upper_coh_lengths)]:
-    #     renamed = df.set_index("date").add_prefix(name + "_")
-    #     all_coh[renamed.columns] = renamed.reindex(all_idx).interpolate("linear").bfill().ffill()
-    # plt.fill_between(all_coh.index, all_coh["upper_median"] / 1e3, all_coh["lower_median"] / 1e3, color="gray")
     for data, params in [
         (
             front_lengths,
@@ -1746,8 +1666,6 @@ def plot_multi_front_velocity(show: bool = True, force_redo: bool = False):
                     s=6,
                 )
 
-            # if row_n == 0 and col_n == 0:
-            #     plt.legend()
 
             plt.text(
                 0.5, 0.97, name, transform=plt.gca().transAxes, va="top", ha="center"
@@ -1777,8 +1695,6 @@ def plot_multi_front_velocity(show: bool = True, force_redo: bool = False):
                 va="top",
             )
 
-    # for i, glacier in enumerate(glaciers):
-    #     plt.subplot(1, 4, i +1)
     plt.tight_layout(w_pad=-0.5, rect=(0.02, 0.0, 1.0, 1.0))
     plt.text(
         0.01,
@@ -1839,14 +1755,6 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
         if len(glaciers[-1]) >= n_cols:
             glaciers.append([])
         glaciers[-1].append(glacier)
-
-    # glaciers = [
-    #     ["arnesen", "osborne", "kval", "stone"],
-    #     ["eton", "bore", "morsnev", "penck"],
-    #     ["scheele", "vallakra", "delta", "natascha"],
-    #     ["nordsyssel", "sefstrom", "doktor", "edvard"],
-    # ]
-    # version = "top_down"
 
     stats = surge_statistics()
 
@@ -1961,12 +1869,6 @@ def plot_multi_front_evolution(show: bool = True, force_redo: bool = False):
         rect["width"] = min(1.0, rect["start_x"] + rect["width"]) - rect["start_x"]
         # The bounds are needed later for labelling. This stores the bounds info.
         groups[group]["rect"] = rect
-
-        # Add an outline rectangle.
-        # fig.patches.append(plt.Rectangle((rect["start_x"], rect["start_y"]), rect["width"], rect["height"], transform=fig.transFigure, figure=fig, zorder=1000, facecolor="none", edgecolor="black"))
-
-        # Add the title of the group
-        # plt.text(rect["start_x"] + rect["width"] / 2, rect["start_y"] + rect["height"] - 0.03, group, ha="center", transform=fig.transFigure)
 
         # Add each glacier
         for row_n, row in enumerate(glaciers):
@@ -2224,10 +2126,6 @@ def load_coh(glacier: str):
         int(np.ceil((bounds.right - bounds.left) / res[0])),
     )
 
-    # plt.imshow(centerline_rst)
-    # plt.show()
-
-    # rasterio.features.rasterize((domain
     meta = {}
     data = {"coh": {}}
 
@@ -2320,12 +2218,6 @@ def load_coh(glacier: str):
         plt.xticks([0.0, 0.5, 1.0], None if i == 0 else [""] * 3)
 
         plt.grid(alpha=0.5)
-        # plt.xticks(plt.gca().get_xticks()[[0, -1]])
-
-        # plt.title(year)
-        # plt.imshow(data[year], cmap="Greys_r")
-
-    # plt.legend()
 
     if glacier == "natascha":
         plt.subplots_adjust(left=0.08, bottom=0.05, right=0.99, top=0.95, wspace=0.01)
