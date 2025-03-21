@@ -10,7 +10,6 @@ geopandas
 shapely
 ipython
 tenacity
-projectfiles
 rasterio
 gdal
 glacier_lengths

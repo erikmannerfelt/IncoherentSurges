@@ -1,5 +1,6 @@
 import collections.abc
 import fnmatch
+import hashlib
 import itertools
 import json
 from pathlib import Path
@@ -12,7 +13,6 @@ import matplotlib.pyplot as plt
 import matplotlib.transforms
 import numpy as np
 import pandas as pd
-import projectfiles
 import rasterio
 import rasterio.features
 import rasterio.transform
@@ -343,9 +343,8 @@ def get_length_evolution(glacier: str, force_redo: bool = False) -> pd.DataFrame
     )
 
     # Load the results from cache if it exists and the inputs have not changed.
-    checksum = projectfiles.get_checksum(
-        [front_positions, centerline, domain, coh_boundary]
-    )
+    checksum = hashlib.sha256("".join(map(str, [front_positions, centerline, domain, coh_boundary])).encode()).hexdigest()
+
     cache_filepath = (
         CACHE_DIR
         / f"get_length_evolution/get_length_evolution-{glacier}-{checksum}.csv"
