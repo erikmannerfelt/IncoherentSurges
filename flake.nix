@@ -17,6 +17,7 @@
           name = "IncoherentSurges";
           buildInputs = with pkgs; [
             my-python
+            ruff
           ];
         };
       }
